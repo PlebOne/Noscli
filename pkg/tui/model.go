@@ -22,6 +22,7 @@ import (
 	"github.com/nbd-wtf/go-nostr/nip19"
 	"github.com/nbd-wtf/go-nostr/nip44"
 	"github.com/nbd-wtf/go-nostr/nip59"
+	"noscli/pkg/config"
 	"noscli/pkg/nwc"
 	"noscli/pkg/signer"
 	"noscli/pkg/zap"
@@ -126,18 +127,30 @@ func NewModel() Model {
 	ta.SetWidth(60)
 	ta.SetHeight(5)
 	
+	// Load saved config
+	cfg, cfgErr := config.Load()
+	if cfgErr != nil {
+		// Non-fatal, just use defaults
+		cfg = &config.Config{
+			Relays: []string{"wss://relay.damus.io", "wss://relay.nostr.band"},
+		}
+	}
+	
 	m := Model{
 		state:       stateLanding,
 		currentView: viewFollowing,
 		signer:      s,
 		pool:        nostr.NewSimplePool(context.Background()),
-		relays:      []string{"wss://relay.damus.io", "wss://relay.nostr.band"}, // Default relays (removed nos.lol to reduce load)
+		relays:      cfg.Relays,
 		cursor:      0,
 		userCache:   make(map[string]string),
 		readDMs:     make(map[string]bool),
 		readNotifs:  make(map[string]bool),
 		textarea:    ta,
 		landingChoice: 0,
+		authMethod:  cfg.AuthMethod,
+		nsecKey:     cfg.Nsec,
+		nwcString:   cfg.NWC,
 	}
 	if err != nil {
 		m.state = stateError
@@ -399,6 +412,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							
 							m.nwcString = cleanNWC
 							m.editingNWC = false
+							m.saveConfig()
 							m.statusMsg = "✓ NWC connection saved!"
 						} else {
 							m.statusMsg = "❌ Invalid NWC format - must start with nostr+walletconnect://"
@@ -434,6 +448,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.relays = append(m.relays, strings.TrimSpace(m.newRelayInput))
 						m.newRelayInput = ""
 						m.editingRelay = false
+						m.saveConfig()
 					}
 				case "backspace":
 					if len(m.newRelayInput) > 0 {
@@ -474,6 +489,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					// Auth method selection
 					if m.settingsCursor == 0 {
 						m.authMethod = "pleb_signer"
+						m.saveConfig()
 					} else {
 						m.editingNsec = true
 						m.nsecKey = ""
@@ -500,10 +516,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if m.settingsCursor >= len(m.relays) {
 						m.settingsCursor = len(m.relays) - 1
 					}
+					m.saveConfig()
 				}
 				// Delete NWC connection (only in wallet menu)
 				if m.settingsMenu == 2 {
 					m.nwcString = ""
+					m.saveConfig()
 					m.statusMsg = "NWC connection removed"
 				}
 			case "e":
@@ -850,7 +868,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.authMethod = "nsec"
 		m.pubKey = msg.pubKey
 		m.privKey = msg.privKey
-		m.nsecKey = "" // Clear the input field
+		m.nsecKey = msg.privKey // Save for persistence
+		m.saveConfig()
 		if m.pubKey == "" {
 			m.state = stateError
 			m.err = fmt.Errorf("received empty pubkey")
@@ -2762,6 +2781,11 @@ content.WriteString(footerStyle.Render("💡 Get your NWC string from Alby, Muti
 }
 content.WriteString("\n\n")
 content.WriteString(footerStyle.Render("Tab to switch • Esc/q back"))
+
+// Add config file location hint at the bottom
+configPath, _ := config.GetConfigPath()
+content.WriteString("\n")
+content.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render(fmt.Sprintf("Config: %s", configPath)))
 }
 }
 
@@ -3119,6 +3143,19 @@ func (m *Model) resetSubscriptions() {
 	
 	// Create new context for subscriptions
 	m.activeSubCtx, m.cancelSubs = context.WithCancel(context.Background())
+}
+
+// saveConfig persists the current settings to disk
+func (m *Model) saveConfig() {
+	cfg := &config.Config{
+		AuthMethod: m.authMethod,
+		Nsec:       m.nsecKey,
+		Relays:     m.relays,
+		NWC:        m.nwcString,
+	}
+	
+	// Don't block UI if save fails
+	_ = config.Save(cfg)
 }
 
 func min(a, b int) int {
