@@ -318,9 +318,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.nsecKey = m.nsecKey[:len(m.nsecKey)-1]
 					}
 				default:
-					// Add character to input
-					if len(msg.String()) == 1 {
-						m.nsecKey += msg.String()
+					// Handle paste events and single character input
+					input := msg.String()
+					if len(input) > 0 {
+						// Accept both single chars and multi-char paste
+						m.nsecKey += input
 					}
 				}
 				return m, nil
@@ -343,9 +345,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.newRelayInput = m.newRelayInput[:len(m.newRelayInput)-1]
 					}
 				default:
-					// Add character to input
-					if len(msg.String()) == 1 {
-						m.newRelayInput += msg.String()
+					// Handle paste events and single character input
+					input := msg.String()
+					if len(input) > 0 {
+						// Accept both single chars and multi-char paste
+						m.newRelayInput += input
 					}
 				}
 				return m, nil
@@ -2408,12 +2412,12 @@ content.WriteString("\n")
 
 if m.editingNsec {
 content.WriteString("\n")
-content.WriteString(headerStyle.Render("Enter your nsec key:"))
+content.WriteString(headerStyle.Render("Enter your nsec key (paste supported):"))
 content.WriteString("\n")
 maskedKey := strings.Repeat("*", len(m.nsecKey))
 content.WriteString(itemStyle.Render(fmt.Sprintf("> %s_", maskedKey)))
 content.WriteString("\n")
-content.WriteString(footerStyle.Render("Enter to save • Esc to cancel"))
+content.WriteString(footerStyle.Render("Enter to save • Esc to cancel • Ctrl+Shift+V to paste"))
 } else {
 content.WriteString("\n\n")
 if m.authMethod == "" {
