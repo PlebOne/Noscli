@@ -78,6 +78,8 @@ type Model struct {
 	relays        []string
 	eventLines    []int              // Track which line each event starts at
 	userCache     map[string]string  // pubkey -> display name
+	readDMs       map[string]bool    // DM event IDs that have been read
+	readNotifs    map[string]bool    // Notification event IDs that have been read
 	lastEventTime nostr.Timestamp    // Latest event timestamp for refresh
 	lastDMTime    nostr.Timestamp    // Latest DM timestamp for refresh
 	lastNotifTime nostr.Timestamp    // Latest notification timestamp for refresh
@@ -119,6 +121,8 @@ func NewModel() Model {
 		relays:      []string{"wss://relay.damus.io", "wss://nos.lol", "wss://relay.nostr.band"}, // Default relays
 		cursor:      0,
 		userCache:   make(map[string]string),
+		readDMs:     make(map[string]bool),
+		readNotifs:  make(map[string]bool),
 		textarea:    ta,
 		landingChoice: 0,
 	}
@@ -588,6 +592,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.updateContent()
 					return m, fetchDMsCmd(m.pool, m.relays, m.pubKey)
 				}
+				// Mark currently visible DMs as read
+				m.markVisibleAsRead(viewDMs)
 			case viewDMs:
 				m.currentView = viewNotifications
 				if len(m.notifications) == 0 {
@@ -595,6 +601,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.updateContent()
 					return m, fetchNotificationsCmd(m.pool, m.relays, m.pubKey)
 				}
+				// Mark currently visible notifications as read
+				m.markVisibleAsRead(viewNotifications)
 			case viewNotifications:
 				m.currentView = viewFollowing
 			}
@@ -1122,18 +1130,35 @@ func (m Model) View() string {
 	tabStyle := lipgloss.NewStyle().Padding(0, 2)
 	activeTabStyle := tabStyle.Copy().Bold(true).Foreground(lipgloss.Color("205"))
 	inactiveTabStyle := tabStyle.Copy().Foreground(lipgloss.Color("241"))
+	unreadBadgeStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("214"))
+
+	// Count unread DMs and notifications
+	unreadDMs := m.countUnread(viewDMs)
+	unreadNotifs := m.countUnread(viewNotifications)
 
 	followingTab := inactiveTabStyle.Render("Following")
 	dmsTab := inactiveTabStyle.Render("DMs")
+	if unreadDMs > 0 {
+		dmsTab = inactiveTabStyle.Render(fmt.Sprintf("DMs %s", unreadBadgeStyle.Render(fmt.Sprintf("(%d)", unreadDMs))))
+	}
 	notificationsTab := inactiveTabStyle.Render("Notifications")
+	if unreadNotifs > 0 {
+		notificationsTab = inactiveTabStyle.Render(fmt.Sprintf("Notifications %s", unreadBadgeStyle.Render(fmt.Sprintf("(%d)", unreadNotifs))))
+	}
 
 	switch m.currentView {
 	case viewFollowing:
 		followingTab = activeTabStyle.Render("Following")
 	case viewDMs:
 		dmsTab = activeTabStyle.Render("DMs")
+		if unreadDMs > 0 {
+			dmsTab = activeTabStyle.Render(fmt.Sprintf("DMs %s", unreadBadgeStyle.Render(fmt.Sprintf("(%d)", unreadDMs))))
+		}
 	case viewNotifications:
 		notificationsTab = activeTabStyle.Render("Notifications")
+		if unreadNotifs > 0 {
+			notificationsTab = activeTabStyle.Render(fmt.Sprintf("Notifications %s", unreadBadgeStyle.Render(fmt.Sprintf("(%d)", unreadNotifs))))
+		}
 	}
 
 	tabs := lipgloss.JoinHorizontal(lipgloss.Top, followingTab, dmsTab, notificationsTab)
@@ -1339,12 +1364,24 @@ func (m *Model) renderEvent(evt nostr.Event, selected bool) string {
 	timestampStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 	
 	var header string
+	unreadIndicator := ""
+	
+	// Add unread indicator for DMs and notifications
+	if (evt.Kind == 4 || evt.Kind == 1059) && !m.readDMs[evt.ID] {
+		unreadIndicator = "🔵 "
+	} else if evt.Kind == 1 && evt.PubKey != m.pubKey && !m.readNotifs[evt.ID] {
+		// Notification (reply/mention) that's unread
+		unreadIndicator = "🔵 "
+	}
+	
 	if dmPrefix != "" {
-		header = fmt.Sprintf("%s  %s", 
+		header = fmt.Sprintf("%s%s  %s", 
+			unreadIndicator,
 			headerStyle.Render(dmPrefix),
 			timestampStyle.Render(timestamp))
 	} else {
-		header = fmt.Sprintf("%s  %s", 
+		header = fmt.Sprintf("%s%s  %s", 
+			unreadIndicator,
 			headerStyle.Render("@"+displayName),
 			timestampStyle.Render(timestamp))
 	}
@@ -2663,4 +2700,40 @@ if a < b {
 return a
 }
 return b
+}
+
+// countUnread returns the number of unread messages for a given view
+func (m *Model) countUnread(view viewMode) int {
+count := 0
+switch view {
+case viewDMs:
+for _, evt := range m.dms {
+if !m.readDMs[evt.ID] {
+count++
+}
+}
+case viewNotifications:
+for _, evt := range m.notifications {
+if !m.readNotifs[evt.ID] {
+count++
+}
+}
+}
+return count
+}
+
+// markVisibleAsRead marks currently visible messages as read
+func (m *Model) markVisibleAsRead(view viewMode) {
+switch view {
+case viewDMs:
+// Mark all currently loaded DMs as read
+for _, evt := range m.dms {
+m.readDMs[evt.ID] = true
+}
+case viewNotifications:
+// Mark all currently loaded notifications as read
+for _, evt := range m.notifications {
+m.readNotifs[evt.ID] = true
+}
+}
 }
