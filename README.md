@@ -5,9 +5,11 @@ A command-line Nostr client built with Go and Charm tools (Bubble Tea, Lip Gloss
 ## Features
 - **Landing Screen**: Beautiful welcome screen with app info and quick access to client or settings.
 - **Dual Authentication**: Choose between Pleb Signer (DBus) or direct nsec key input.
-- **Settings**: Configure authentication method and Nostr relays - add, remove, and manage connections.
+- **Settings**: Configure authentication method, Nostr relays, and Nostr Wallet Connect - add, remove, and manage connections.
 - **Pleb Signer Integration**: Secure login using [Pleb Signer](https://github.com/PlebOne/Pleb_Signer) via DBus (optional).
+- **Lightning Zaps ⚡**: Send satoshis to support posts you like using Nostr Wallet Connect (NIP-47/NIP-57).
 - **Multiple Views**: Tab through Following, DMs, and Notifications with the Tab key.
+- **Read/Unread Tracking**: Visual indicators and counts for unread DMs and notifications.
 - **Post & Reply**: Compose new posts and reply to existing posts/DMs with full threading support.
 - **Thread View**: View full conversation threads with all replies in chronological order.
 - **Repost & Quote**: Boost posts or add your thoughts with quote reposts.
@@ -83,15 +85,13 @@ go build -o noscli .
 
 ### Settings Screen
 
-The settings screen has **two tabs** - use `Tab` key to switch between them:
+The settings screen has **three tabs** - use `Tab` key to cycle through them:
 
 ```
-When on Authentication tab:     When on Relays tab:
-[ Authentication ]  Relays       Authentication  [ Relays ]
-      (active)                                     (active)
+Authentication → Relays → Wallet
 ```
 
-Press **Tab** to switch tabs! The active tab is shown in brackets [ ].
+Press **Tab** to switch tabs! The active tab is highlighted.
 
 #### Authentication Tab (Default - You start here)
 Choose how you want to authenticate:
@@ -113,7 +113,7 @@ Configure your Nostr relays:
 - `a`: Add new relay (type URL like wss://relay.example.com and press Enter)
 - `d` or `x`: Delete selected relay (must keep at least one)
 - `Enter`: Start client with current settings (only available after auth method is set)
-- `Tab`: Switch to Authentication tab
+- `Tab`: Switch to next tab
 - `Esc` or `q`: Back to landing screen
 
 Default relays:
@@ -121,7 +121,19 @@ Default relays:
 - wss://nos.lol
 - wss://relay.nostr.band
 
-### Client Navigation
+#### Wallet Tab (Press Tab twice to access)
+Configure Nostr Wallet Connect for zapping:
+- Shows current NWC connection status (connected or not)
+- `e`: Edit/add NWC connection string
+  - Paste your `nostr+walletconnect://...` URI
+  - Get from Alby, Mutiny, or other NWC wallets
+  - Press `Enter` to save
+- `d`: Delete current NWC connection
+- `Tab`: Switch to Authentication tab
+- `Esc` or `q`: Back to landing screen
+
+**Note**: Zapping requires both NWC setup and nsec authentication.
+
 ### Client Navigation
 
    - `Tab`: Switch between views (Following → DMs → Notifications)
@@ -137,6 +149,7 @@ Default relays:
    - `r`: Refresh current view (fetches new posts/DMs/notifications and merges with existing)
    - `c`: Compose new post
    - `R`: Reply to selected post/DM
+   - `z`: Zap selected post (requires NWC setup)
    - `x`: Repost selected post (boost)
    - `X`: Quote selected post (add your thoughts)
    - `q`: Quit
@@ -194,6 +207,45 @@ Boost posts to your followers or add your thoughts with a quote:
 - Reposts and quotes are published to all configured relays
 - Quoted posts include proper tags for clients to render them
 
+## Zapping with Lightning ⚡
+
+Noscli supports zapping posts using Nostr Wallet Connect (NWC) - send satoshis to support content you enjoy!
+
+### Setup
+
+1. **Get an NWC connection string** from a wallet that supports it:
+   - [Alby](https://getalby.com) - Browser extension and web wallet
+   - [Mutiny](https://www.mutinywallet.com) - Self-custodial web wallet
+   - Other NWC-compatible wallets
+
+2. **Add NWC to noscli**:
+   - Go to Settings (from landing screen)
+   - Press `Tab` twice to reach the **Wallet** tab
+   - Press `e` to edit
+   - Paste your NWC connection string (starts with `nostr+walletconnect://`)
+   - Press `Enter` to save
+
+### How to Zap
+
+1. Navigate to any post in your timeline or notifications
+2. Press `z` to initiate a zap
+3. Enter the amount in satoshis (default: 21 sats)
+4. Press `Enter` to confirm and send the zap
+
+The app will:
+- Fetch the recipient's lightning address from their profile
+- Create a proper NIP-57 zap request
+- Get a lightning invoice
+- Pay it via your NWC wallet
+- Show a success message when complete
+
+**Requirements**:
+- NWC connection string configured in Settings → Wallet
+- nsec authentication (Pleb Signer zaps coming soon)
+- Recipient must have a lightning address in their Nostr profile (lud16 field)
+
+**Note**: The 'z zap' command only appears in the footer when you have NWC connected.
+
 ## Multiple URLs in Posts
 
 When a post contains multiple URLs (images, videos, links), they are displayed with numbers:
@@ -214,6 +266,12 @@ When a post contains multiple URLs (images, videos, links), they are displayed w
   - **Following**: Posts from people you follow (kind 1 from contact list)
   - **DMs**: Encrypted direct messages (kind 4 NIP-04, kind 1059 NIP-17) - sent and received
   - **Notifications**: Mentions, replies (kind 1 with 'p' tag), and reactions (kind 7)
+- Lightning payments via Nostr Wallet Connect:
+  - **NIP-47**: Nostr Wallet Connect protocol for secure payment requests
+  - **NIP-57**: Zap protocol for creating lightning invoices tied to Nostr events
+  - Fetches recipient lightning address from profile metadata
+  - Creates zap request events with proper tags
+  - Communicates with NWC-compatible wallets (Alby, Mutiny, etc.)
 - Robust error handling with panic recovery for relay operations
 - Fetches your contact list (kind 3 event) to show posts from people you follow
 - Fetches and caches user metadata (kind 0 events) for display names
@@ -236,6 +294,7 @@ When a post contains multiple URLs (images, videos, links), they are displayed w
 - Lazy loading: DMs and Notifications are fetched when you first tab to them
 - Event deduplication: Refreshing merges new events with existing ones (no duplicates)
 - Status messages show count of new items when refreshing
+- Read/unread tracking: Blue dot indicators and count badges for new DMs and notifications
 - Multi-URL support: Posts with multiple URLs show numbered indicators for easy selection
 - Publishing capabilities:
   - Create new posts (kind 1)
