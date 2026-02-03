@@ -17,6 +17,7 @@ import (
 	"github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/nbd-wtf/go-nostr"
+	"github.com/nbd-wtf/go-nostr/nip04"
 	"github.com/nbd-wtf/go-nostr/nip19"
 	"noscli/pkg/signer"
 )
@@ -485,7 +486,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						return m, nil
 					}
 					m.statusMsg = "Sending DM..."
-					return m, publishDMCmd(m.signer, m.pool, m.relays, m.pubKey, m.replyingTo.PubKey, content)
+					return m, publishDMCmd(m.signer, m.pool, m.relays, m.pubKey, m.replyingTo.PubKey, content, m.authMethod, m.privKey)
 				}
 			default:
 				var cmd tea.Cmd
@@ -1176,7 +1177,35 @@ func (m *Model) renderEvent(evt nostr.Event, selected bool) string {
 		Padding(0, 1).
 		Width(60)
 
-	content := m.processContent(evt.Content)
+	// Decrypt DMs if this is a kind 4 event
+	displayContent := evt.Content
+	if evt.Kind == 4 {
+		// Determine the other party's pubkey for decryption
+		otherPubkey := ""
+		if evt.PubKey == m.pubKey {
+			// We sent this, decrypt with recipient's key
+			for _, tag := range evt.Tags {
+				if len(tag) >= 2 && tag[0] == "p" {
+					otherPubkey = tag[1]
+					break
+				}
+			}
+		} else {
+			// We received this, decrypt with sender's key
+			otherPubkey = evt.PubKey
+		}
+		
+		if otherPubkey != "" {
+			decrypted, err := m.decryptDM(evt.Content, otherPubkey)
+			if err == nil {
+				displayContent = decrypted
+			} else {
+				displayContent = "[🔒 Encrypted - Failed to decrypt]"
+			}
+		}
+	}
+	
+	content := m.processContent(displayContent)
 	
 	// Extract and annotate all URLs with numbers
 	urls := extractAllURLs(evt.Content)
@@ -1956,15 +1985,31 @@ func publishPostCmd(signer *signer.PlebSigner, pool *nostr.SimplePool, relays []
 	}
 }
 
-func publishDMCmd(signer *signer.PlebSigner, pool *nostr.SimplePool, relays []string, pubKey string, recipientPubKey string, content string) tea.Cmd {
+func publishDMCmd(signer *signer.PlebSigner, pool *nostr.SimplePool, relays []string, pubKey string, recipientPubKey string, content string, authMethod string, privKey string) tea.Cmd {
 	return func() tea.Msg {
 		// Encrypt content using NIP-04
-		encrypted, err := signer.Nip04Encrypt(recipientPubKey, content)
-		if err != nil {
-			return errMsg{fmt.Errorf("failed to encrypt DM: %w", err)}
+		var encrypted string
+		var err error
+		
+		if authMethod == "nsec" && privKey != "" {
+			// Encrypt directly with private key
+			sharedSecret, err := nip04.ComputeSharedSecret(recipientPubKey, privKey)
+			if err != nil {
+				return errMsg{fmt.Errorf("failed to compute shared secret: %w", err)}
+			}
+			encrypted, err = nip04.Encrypt(content, sharedSecret)
+			if err != nil {
+				return errMsg{fmt.Errorf("failed to encrypt DM: %w", err)}
+			}
+		} else {
+			// Use Pleb Signer
+			encrypted, err = signer.Nip04Encrypt(recipientPubKey, content)
+			if err != nil {
+				return errMsg{fmt.Errorf("failed to encrypt DM: %w", err)}
+			}
 		}
 		
-		// Create DM event WITHOUT pubkey - let Pleb Signer set everything
+		// Create DM event
 		evt := nostr.Event{
 			Kind:      nostr.KindEncryptedDirectMessage,
 			Content:   encrypted,
@@ -1972,8 +2017,12 @@ func publishDMCmd(signer *signer.PlebSigner, pool *nostr.SimplePool, relays []st
 			Tags:      nostr.Tags{nostr.Tag{"p", recipientPubKey}},
 		}
 		
-		// Sign event (sets PubKey, ID and Sig)
-		err = signer.SignEvent(&evt)
+		// Sign event
+		if authMethod == "nsec" && privKey != "" {
+			err = evt.Sign(privKey)
+		} else {
+			err = signer.SignEvent(&evt)
+		}
 		if err != nil {
 			return errMsg{fmt.Errorf("failed to sign DM: %w", err)}
 		}
@@ -2376,5 +2425,24 @@ return evt.Sign(m.privKey)
 } else {
 // Use Pleb Signer
 return m.signer.SignEvent(evt)
+}
+}
+
+// decryptDM decrypts a DM using either Pleb Signer or direct nsec key
+func (m *Model) decryptDM(ciphertext, otherPubkey string) (string, error) {
+if m.authMethod == "nsec" && m.privKey != "" {
+// Decrypt directly with private key using NIP-04
+sharedSecret, err := nip04.ComputeSharedSecret(otherPubkey, m.privKey)
+if err != nil {
+return "", err
+}
+plaintext, err := nip04.Decrypt(ciphertext, sharedSecret)
+if err != nil {
+return "", err
+}
+return plaintext, nil
+} else {
+// Use Pleb Signer
+return m.signer.Nip04Decrypt(ciphertext, otherPubkey)
 }
 }
