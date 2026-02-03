@@ -19,6 +19,8 @@ import (
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/nbd-wtf/go-nostr/nip04"
 	"github.com/nbd-wtf/go-nostr/nip19"
+	"github.com/nbd-wtf/go-nostr/nip44"
+	"github.com/nbd-wtf/go-nostr/nip59"
 	"noscli/pkg/signer"
 )
 
@@ -929,21 +931,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.updateContent()
 		
 	case publishSuccessMsg:
-		// Determine what was published based on current state
-		action := "Published"
-		if msg.eventID != "" {
-			// Check the last status to determine action type
-			if strings.Contains(m.statusMsg, "Reposting") {
-				action = "Reposted"
-			} else if strings.Contains(m.statusMsg, "quote") {
-				action = "Quote published"
-			} else if strings.Contains(m.statusMsg, "reply") {
-				action = "Reply sent"
-			} else if strings.Contains(m.statusMsg, "DM") {
-				action = "DM sent"
+		// Use custom status if provided, otherwise determine from context
+		if msg.status != "" {
+			m.statusMsg = msg.status
+		} else {
+			// Determine what was published based on current state
+			action := "Published"
+			if msg.eventID != "" {
+				// Check the last status to determine action type
+				if strings.Contains(m.statusMsg, "Reposting") {
+					action = "Reposted"
+				} else if strings.Contains(m.statusMsg, "quote") {
+					action = "Quote published"
+				} else if strings.Contains(m.statusMsg, "reply") {
+					action = "Reply sent"
+				} else if strings.Contains(m.statusMsg, "DM") {
+					action = "DM sent"
+				}
 			}
+			m.statusMsg = action + " successfully! ✓"
 		}
-		m.statusMsg = action + " successfully! ✓"
 		m.replyingTo = nil
 		// Refresh current view to show new post
 		switch m.currentView {
@@ -1206,8 +1213,12 @@ func (m *Model) renderEvent(evt nostr.Event, selected bool) string {
 		}
 	} else if evt.Kind == 1059 {
 		// NIP-17: Gift-wrapped DM
-		displayContent = "[🎁 NIP-17 Gift-wrapped DM - Unwrap support coming soon]"
-		// TODO: Implement NIP-59 unwrapping
+		decrypted, err := m.unwrapGiftWrapDM(evt)
+		if err == nil {
+			displayContent = decrypted
+		} else {
+			displayContent = fmt.Sprintf("[🎁 NIP-17 Gift-wrap - Unwrap error: %v]", err)
+		}
 	}
 	
 	content := m.processContent(displayContent)
@@ -1923,6 +1934,7 @@ func downloadToTemp(url string, ext string) (string, error) {
 
 type publishSuccessMsg struct {
 	eventID string
+	status  string // Optional custom status message
 }
 
 func publishPostCmd(signer *signer.PlebSigner, pool *nostr.SimplePool, relays []string, pubKey string, content string, replyTo *nostr.Event, authMethod string, privKey string) tea.Cmd {
@@ -1992,71 +2004,144 @@ func publishPostCmd(signer *signer.PlebSigner, pool *nostr.SimplePool, relays []
 
 func publishDMCmd(signer *signer.PlebSigner, pool *nostr.SimplePool, relays []string, pubKey string, recipientPubKey string, content string, authMethod string, privKey string) tea.Cmd {
 	return func() tea.Msg {
-		// Encrypt content using NIP-04
-		var encrypted string
-		var err error
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
 		
+		// Use NIP-17 (gift wrap) if using nsec, NIP-04 if using Pleb Signer
 		if authMethod == "nsec" && privKey != "" {
-			// Encrypt directly with private key
-			sharedSecret, err := nip04.ComputeSharedSecret(recipientPubKey, privKey)
-			if err != nil {
-				return errMsg{fmt.Errorf("failed to compute shared secret: %w", err)}
+			// Send NIP-17 gift-wrapped DM with NIP-44 encryption
+			// Create the rumor (unsigned event with actual DM content)
+			rumor := nostr.Event{
+				Kind:      nostr.KindDirectMessage, // Kind 14
+				Content:   content,
+				CreatedAt: nostr.Now(),
+				Tags:      nostr.Tags{nostr.Tag{"p", recipientPubKey}},
+				PubKey:    pubKey,
 			}
-			encrypted, err = nip04.Encrypt(content, sharedSecret)
-			if err != nil {
-				return errMsg{fmt.Errorf("failed to encrypt DM: %w", err)}
+			rumor.ID = rumor.GetID()
+			
+			// Create encrypt function for gift wrapping
+			encrypt := func(plaintext string, targetPubkey string) (string, error) {
+				conversationKey, err := nip44.GenerateConversationKey(targetPubkey, privKey)
+				if err != nil {
+					return "", err
+				}
+				return nip44.Encrypt(plaintext, conversationKey)
 			}
+			
+			// Create sign function
+			sign := func(evt *nostr.Event) error {
+				return evt.Sign(privKey)
+			}
+			
+			// Gift wrap to recipient
+			giftWrapToRecipient, err := nip59.GiftWrap(
+				rumor,
+				recipientPubKey,
+				func(plaintext string) (string, error) {
+					return encrypt(plaintext, recipientPubKey)
+				},
+				sign,
+				nil,
+			)
+			if err != nil {
+				return errMsg{fmt.Errorf("failed to create gift wrap for recipient: %w", err)}
+			}
+			
+			// Gift wrap to ourselves (so we can see it in our DM list)
+			giftWrapToUs, err := nip59.GiftWrap(
+				rumor,
+				pubKey,
+				func(plaintext string) (string, error) {
+					return encrypt(plaintext, pubKey)
+				},
+				sign,
+				nil,
+			)
+			if err != nil {
+				return errMsg{fmt.Errorf("failed to create gift wrap for self: %w", err)}
+			}
+			
+			// Publish both gift wraps
+			successCount := 0
+			var lastErr error
+			
+			// Publish to recipient
+			results := pool.PublishMany(ctx, relays, giftWrapToRecipient)
+			for result := range results {
+				if result.Error == nil {
+					successCount++
+				} else {
+					lastErr = result.Error
+				}
+			}
+			
+			// Publish to ourselves
+			results = pool.PublishMany(ctx, relays, giftWrapToUs)
+			for result := range results {
+				if result.Error == nil {
+					successCount++
+				} else {
+					lastErr = result.Error
+				}
+			}
+			
+			if successCount == 0 {
+				if lastErr != nil {
+					return errMsg{fmt.Errorf("failed to publish NIP-17 DM: %w", lastErr)}
+				}
+				return errMsg{fmt.Errorf("failed to publish NIP-17 DM to any relay")}
+			}
+			
+			return publishSuccessMsg{eventID: giftWrapToRecipient.ID, status: "DM sent (NIP-17) ✓"}
 		} else {
+			// Send NIP-04 encrypted DM (for Pleb Signer)
+			var encrypted string
+			var err error
+			
 			// Use Pleb Signer
 			encrypted, err = signer.Nip04Encrypt(recipientPubKey, content)
 			if err != nil {
 				return errMsg{fmt.Errorf("failed to encrypt DM: %w", err)}
 			}
-		}
-		
-		// Create DM event
-		evt := nostr.Event{
-			Kind:      nostr.KindEncryptedDirectMessage,
-			Content:   encrypted,
-			CreatedAt: nostr.Now(),
-			Tags:      nostr.Tags{nostr.Tag{"p", recipientPubKey}},
-		}
-		
-		// Sign event
-		if authMethod == "nsec" && privKey != "" {
-			err = evt.Sign(privKey)
-		} else {
+			
+			// Create DM event
+			evt := nostr.Event{
+				Kind:      nostr.KindEncryptedDirectMessage,
+				Content:   encrypted,
+				CreatedAt: nostr.Now(),
+				Tags:      nostr.Tags{nostr.Tag{"p", recipientPubKey}},
+			}
+			
+			// Sign event with Pleb Signer
 			err = signer.SignEvent(&evt)
-		}
-		if err != nil {
-			return errMsg{fmt.Errorf("failed to sign DM: %w", err)}
-		}
-		
-		// Publish to relays
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		
-		results := pool.PublishMany(ctx, relays, evt)
-		
-		// Collect results and track successes/failures
-		successCount := 0
-		var lastErr error
-		for result := range results {
-			if result.Error == nil {
-				successCount++
-			} else {
-				lastErr = result.Error
+			if err != nil {
+				return errMsg{fmt.Errorf("failed to sign DM: %w", err)}
 			}
-		}
-		
-		if successCount == 0 {
-			if lastErr != nil {
-				return errMsg{fmt.Errorf("failed to publish DM: %w", lastErr)}
+			
+			// Publish to relays
+			results := pool.PublishMany(ctx, relays, evt)
+			
+			// Collect results and track successes/failures
+			successCount := 0
+			var lastErr error
+			for result := range results {
+				if result.Error == nil {
+					successCount++
+				} else {
+					lastErr = result.Error
+				}
 			}
-			return errMsg{fmt.Errorf("failed to publish DM to any relay (no results)")}
+			
+			if successCount == 0 {
+				if lastErr != nil {
+					return errMsg{fmt.Errorf("failed to publish NIP-04 DM: %w", lastErr)}
+				}
+				return errMsg{fmt.Errorf("failed to publish DM to any relay (no results)")}
+			}
+			
+			return publishSuccessMsg{eventID: evt.ID, status: "DM sent (NIP-04) ✓"}
 		}
-		
-		return publishSuccessMsg{eventID: evt.ID}
 	}
 }
 
@@ -2433,21 +2518,54 @@ return m.signer.SignEvent(evt)
 }
 }
 
+// unwrapGiftWrapDM unwraps a NIP-17 gift-wrapped DM (kind 1059)
+func (m *Model) unwrapGiftWrapDM(giftWrapEvent nostr.Event) (string, error) {
+	if m.authMethod == "nsec" && m.privKey != "" {
+		// Decrypt directly with private key using NIP-44
+		// Create decrypt function that NIP-59 expects
+		decrypt := func(otherPubkey, ciphertext string) (string, error) {
+			// Generate conversation key for NIP-44
+			conversationKey, err := nip44.GenerateConversationKey(otherPubkey, m.privKey)
+			if err != nil {
+				return "", fmt.Errorf("failed to generate conversation key: %w", err)
+			}
+			// Decrypt with NIP-44
+			plaintext, err := nip44.Decrypt(ciphertext, conversationKey)
+			if err != nil {
+				return "", fmt.Errorf("failed to decrypt: %w", err)
+			}
+			return plaintext, nil
+		}
+		
+		// Use nip59.GiftUnwrap to unwrap the gift-wrapped DM
+		rumor, err := nip59.GiftUnwrap(giftWrapEvent, decrypt)
+		if err != nil {
+			return "", fmt.Errorf("failed to unwrap gift: %w", err)
+		}
+		
+		// The rumor contains the actual DM content
+		return rumor.Content, nil
+	} else {
+		// Pleb Signer doesn't support NIP-44 yet
+		return "", fmt.Errorf("NIP-17 DMs require nsec authentication (Pleb Signer NIP-44 support coming soon)")
+	}
+}
+
 // decryptDM decrypts a DM using either Pleb Signer or direct nsec key
 func (m *Model) decryptDM(ciphertext, otherPubkey string) (string, error) {
-if m.authMethod == "nsec" && m.privKey != "" {
-// Decrypt directly with private key using NIP-04
-sharedSecret, err := nip04.ComputeSharedSecret(otherPubkey, m.privKey)
-if err != nil {
-return "", err
-}
-plaintext, err := nip04.Decrypt(ciphertext, sharedSecret)
-if err != nil {
-return "", err
-}
-return plaintext, nil
-} else {
-// Use Pleb Signer (note: signature is senderPubKey first, then ciphertext)
-return m.signer.Nip04Decrypt(otherPubkey, ciphertext)
-}
+	if m.authMethod == "nsec" && m.privKey != "" {
+		// Decrypt directly with private key using NIP-04
+		sharedSecret, err := nip04.ComputeSharedSecret(otherPubkey, m.privKey)
+		if err != nil {
+			return "", err
+		}
+		plaintext, err := nip04.Decrypt(ciphertext, sharedSecret)
+		if err != nil {
+			return "", err
+		}
+		return plaintext, nil
+	} else {
+		// Use Pleb Signer (note: signature is senderPubKey first, then ciphertext)
+		return m.signer.Nip04Decrypt(otherPubkey, ciphertext)
+	}
 }
