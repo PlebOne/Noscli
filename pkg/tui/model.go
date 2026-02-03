@@ -305,15 +305,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				case "enter":
 					if strings.TrimSpace(m.nsecKey) != "" {
 						// Validate nsec format
-						if strings.HasPrefix(strings.TrimSpace(m.nsecKey), "nsec1") {
+						trimmedKey := strings.TrimSpace(m.nsecKey)
+						if strings.HasPrefix(trimmedKey, "nsec1") {
 							m.editingNsec = false
+							m.statusMsg = "Decoding nsec key..."
 							// Decode and save the nsec key
-							return m, connectWithNsecCmd(strings.TrimSpace(m.nsecKey))
+							return m, connectWithNsecCmd(trimmedKey)
 						} else {
-							m.statusMsg = "Invalid nsec format - must start with nsec1"
+							m.statusMsg = "❌ Invalid nsec format - must start with nsec1"
 							m.nsecKey = ""
 							m.editingNsec = false
 						}
+					} else {
+						m.statusMsg = "❌ Please enter an nsec key"
+						m.editingNsec = false
 					}
 				case "backspace":
 					if len(m.nsecKey) > 0 {
@@ -984,22 +989,29 @@ func (m Model) View() string {
 	}
 	
 	if m.state == stateError {
-		msg := fmt.Sprintf("Error connecting to Pleb Signer: %v\n\n", m.err)
-		if strings.Contains(m.err.Error(), "No keys configured") {
-			msg += "Pleb Signer is running but the key is locked or unavailable.\n\n"
-			msg += "Please:\n"
-			msg += "1. Click the Pleb Signer icon in your system tray\n"
-			msg += "2. Unlock it with your password\n"
-			msg += "3. Make sure a key is active and available\n"
-			msg += "4. Try running noscli again\n"
-		} else if strings.Contains(m.err.Error(), "not activatable") || strings.Contains(m.err.Error(), "ServiceUnknown") {
-			msg += "Pleb Signer is not running.\n\n"
-			msg += "Please start Pleb Signer:\n"
-			msg += "  pleb-signer\n"
+		var msg string
+		if m.authMethod == "nsec" {
+			msg = fmt.Sprintf("Error with nsec authentication: %v\n\n", m.err)
+			msg += "Please check your nsec key and try again.\n"
+			msg += "\nPress q to quit or Esc to go back to settings."
 		} else {
-			msg += "Make sure Pleb Signer is running and unlocked.\n"
+			msg = fmt.Sprintf("Error connecting to Pleb Signer: %v\n\n", m.err)
+			if strings.Contains(m.err.Error(), "No keys configured") {
+				msg += "Pleb Signer is running but the key is locked or unavailable.\n\n"
+				msg += "Please:\n"
+				msg += "1. Click the Pleb Signer icon in your system tray\n"
+				msg += "2. Unlock it with your password\n"
+				msg += "3. Make sure a key is active and available\n"
+				msg += "4. Try running noscli again\n"
+			} else if strings.Contains(m.err.Error(), "not activatable") || strings.Contains(m.err.Error(), "ServiceUnknown") {
+				msg += "Pleb Signer is not running.\n\n"
+				msg += "Please start Pleb Signer:\n"
+				msg += "  pleb-signer\n"
+			} else {
+				msg += "Make sure Pleb Signer is running and unlocked.\n"
+			}
+			msg += "\nPress q to quit."
 		}
-		msg += "\nPress q to quit."
 		return msg
 	}
 
@@ -2424,6 +2436,14 @@ content.WriteString("\n")
 content.WriteString(footerStyle.Render("Enter to save • Esc to cancel • Ctrl+Shift+V to paste"))
 } else {
 content.WriteString("\n\n")
+
+// Show status messages
+if m.statusMsg != "" {
+statusStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Padding(0, 2)
+content.WriteString(statusStyle.Render(m.statusMsg))
+content.WriteString("\n")
+}
+
 if m.authMethod == "" {
 content.WriteString(footerStyle.Render("⚠️  Please select an authentication method before starting client"))
 content.WriteString("\n")
