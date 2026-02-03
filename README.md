@@ -11,7 +11,7 @@ A command-line Nostr client built with Go and Charm tools (Bubble Tea, Lip Gloss
 - **Post & Reply**: Compose new posts and reply to existing posts/DMs with full threading support.
 - **Thread View**: View full conversation threads with all replies in chronological order.
 - **Repost & Quote**: Boost posts or add your thoughts with quote reposts.
-- **Encrypted DMs**: Send and view encrypted direct messages using NIP-04 encryption (legacy) with NIP-17 support coming soon.
+- **Encrypted DMs**: Send and receive encrypted direct messages with full support for both NIP-04 (legacy) and NIP-17 (modern gift-wrapped) encryption standards.
 - **Following List**: Automatically loads your contact list (kind 3) and shows posts from people you follow.
 - **Notifications**: See mentions, replies, and reactions to your posts.
 - **Username Display**: Fetches and caches user profiles (kind 0) to show display names instead of pubkeys.
@@ -241,13 +241,16 @@ When a post contains multiple URLs (images, videos, links), they are displayed w
   - Create new posts (kind 1)
   - Reply to posts with proper threading tags
   - Repost (kind 6) and quote repost posts
-  - Send encrypted DMs (kind 4 NIP-04)
+  - Send encrypted DMs using NIP-04 (with Pleb Signer) or NIP-17 (with nsec)
   - All signing and encryption handled by either Pleb Signer (DBus) or direct nsec key
-- DM Encryption:
-  - **NIP-04** (kind 4): Legacy encrypted DMs - fully supported for send/receive
-  - **NIP-17** (kind 1059/14): Modern gift-wrapped DMs with NIP-44 encryption - detection added, full support coming soon
-  - Automatically detects sent vs received DMs to use correct decryption key
-  - Works with both Pleb Signer and nsec authentication modes
+- DM Encryption - Full support for both standards:
+  - **NIP-04** (kind 4): Legacy encrypted DMs - fully supported for send/receive on both auth modes
+  - **NIP-17** (kind 1059/14): Modern gift-wrapped DMs with NIP-44 encryption - fully supported with nsec auth
+  - **nsec authentication**: Sends NIP-17 (modern), receives both NIP-04 and NIP-17
+  - **Pleb Signer authentication**: Sends NIP-04 (legacy), receives NIP-04 (NIP-17 receive pending signer NIP-44 support)
+  - Gift-wrapped DMs provide enhanced privacy with temporary keys and randomized timestamps
+  - Automatically detects DM type and uses appropriate decryption method
+  - Status messages show which encryption standard was used
 
 ## Media Support Details
 
@@ -310,6 +313,8 @@ This client currently uses an in-memory pool for simplicity as there are no offi
 - Or let mpv handle them (already installed)
 
 **DMs show as encrypted text or fail to decrypt**
-- NIP-04 (kind 4) DMs should now decrypt automatically
-- If decryption fails, ensure Pleb Signer is running and unlocked
-- NIP-17 (kind 1059) gift-wrapped DMs show a placeholder - full support coming soon
+- **NIP-04** DMs (kind 4) should decrypt automatically with both auth modes
+- **NIP-17** DMs (kind 1059) decrypt with nsec authentication
+- If using Pleb Signer and see "NIP-17 pending signer support", switch to nsec auth or ask sender to use NIP-04
+- Ensure Pleb Signer is running and unlocked (if using that mode)
+- NIP-17 provides better privacy with gift wrapping - recommended when using nsec auth
