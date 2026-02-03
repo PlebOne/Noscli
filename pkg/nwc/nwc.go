@@ -43,6 +43,14 @@ type PayInvoiceResponse struct {
 // ParseNWCString parses a nostr+walletconnect:// URI
 // Format: nostr+walletconnect://[pubkey]?relay=[relay]&secret=[secret]
 func ParseNWCString(uri string) (walletPubkey, relay, secret string, err error) {
+	// Clean up the URI - remove newlines, carriage returns, tabs, and extra spaces
+	uri = strings.ReplaceAll(uri, "\n", "")
+	uri = strings.ReplaceAll(uri, "\r", "")
+	uri = strings.ReplaceAll(uri, "\t", "")
+	uri = strings.TrimSpace(uri)
+	// Remove any spaces within the URI
+	uri = strings.ReplaceAll(uri, " ", "")
+	
 	if !strings.HasPrefix(uri, "nostr+walletconnect://") {
 		return "", "", "", fmt.Errorf("invalid NWC URI: must start with nostr+walletconnect://")
 	}
