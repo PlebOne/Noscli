@@ -306,9 +306,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if strings.TrimSpace(m.nsecKey) != "" {
 						// Validate nsec format
 						if strings.HasPrefix(strings.TrimSpace(m.nsecKey), "nsec1") {
-							m.authMethod = "nsec"
 							m.editingNsec = false
+							// Decode and save the nsec key
+							return m, connectWithNsecCmd(strings.TrimSpace(m.nsecKey))
 						} else {
+							m.statusMsg = "Invalid nsec format - must start with nsec1"
 							m.nsecKey = ""
 							m.editingNsec = false
 						}
@@ -691,8 +693,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Basic scrolling could be added here if we had a viewport
 
 	case nsecAuthMsg:
+		m.authMethod = "nsec"
 		m.pubKey = msg.pubKey
 		m.privKey = msg.privKey
+		m.nsecKey = "" // Clear the input field
 		if m.pubKey == "" {
 			m.state = stateError
 			m.err = fmt.Errorf("received empty pubkey")
@@ -705,8 +709,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.npub = npub
+		m.statusMsg = "Authenticated with nsec! Loading..."
 		m.state = stateLoadingFollows
-		m.statusMsg = "Loading following list..."
 		return m, fetchFollowingCmd(m.pool, m.relays, m.pubKey)
 	
 	case pubKeyMsg:
