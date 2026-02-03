@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/url"
 	"strings"
 	"time"
@@ -154,11 +155,15 @@ func (c *NWCClient) PayInvoice(ctx context.Context, invoice string) error {
 	time.Sleep(500 * time.Millisecond)
 
 	// Publish the request using PublishMany
+	log.Printf("📤 Publishing NWC request to relay: %s", c.relay)
 	results := c.pool.PublishMany(ctx, []string{c.relay}, evt)
 	published := false
 	for result := range results {
 		if result.Error == nil {
 			published = true
+			log.Printf("✅ Published NWC request successfully")
+		} else {
+			log.Printf("❌ Publish error: %v", result.Error)
 		}
 	}
 	
@@ -166,13 +171,22 @@ func (c *NWCClient) PayInvoice(ctx context.Context, invoice string) error {
 		return fmt.Errorf("failed to publish request to wallet relay")
 	}
 
+	log.Printf("⏳ Waiting for wallet response (timeout: 30s)...")
+	eventCount := 0
+	
 	// Wait for response - loop through all events
 	for {
 		select {
 		case event := <-responseChan:
+			eventCount++
+			log.Printf("📨 Received event #%d from wallet relay", eventCount)
+			
 			if event.Event == nil {
+				log.Printf("⚠️  Event #%d is nil, skipping", eventCount)
 				continue // Skip empty events
 			}
+
+			log.Printf("📋 Event kind: %d, author: %s", event.Event.Kind, event.Event.PubKey[:8])
 
 			// Check if this is a response to our request
 			isResponse := false
@@ -184,34 +198,45 @@ func (c *NWCClient) PayInvoice(ctx context.Context, invoice string) error {
 			}
 
 			if !isResponse {
+				log.Printf("⚠️  Event #%d not addressed to us (no matching p tag)", eventCount)
 				continue // Not for us
 			}
+
+			log.Printf("✅ Event #%d is for us! Decrypting...", eventCount)
 
 			// Decrypt response
 			decrypted, err := nip04.Decrypt(event.Content, sharedSecret)
 			if err != nil {
+				log.Printf("❌ Failed to decrypt: %v", err)
 				return fmt.Errorf("failed to decrypt response: %w", err)
 			}
+
+			log.Printf("📄 Decrypted response: %s", decrypted)
 
 			// Parse response
 			var response PayInvoiceResponse
 			if err := json.Unmarshal([]byte(decrypted), &response); err != nil {
+				log.Printf("❌ Failed to parse JSON: %v", err)
 				return fmt.Errorf("failed to parse response: %w", err)
 			}
 
 			// Check for errors
 			if response.Error != nil {
+				log.Printf("❌ Wallet returned error: %s - %s", response.Error.Code, response.Error.Message)
 				return fmt.Errorf("wallet error: %s - %s", response.Error.Code, response.Error.Message)
 			}
 
 			if response.Result == nil {
+				log.Printf("❌ No result in response")
 				return fmt.Errorf("no result in response")
 			}
 
+			log.Printf("✅ Payment successful!")
 			return nil
 
 		case <-ctx.Done():
-			return fmt.Errorf("timeout waiting for wallet response (30s) - check wallet relay and connection")
+			log.Printf("⏱️  Timeout after receiving %d events", eventCount)
+			return fmt.Errorf("timeout waiting for wallet response (30s) - received %d events but none matched", eventCount)
 		}
 	}
 }
