@@ -110,6 +110,9 @@ type Model struct {
 	zapAmount     string             // Amount input for zapping
 	zappingEvent  *nostr.Event       // Event being zapped
 	editingZapAmt bool               // Whether we're entering zap amount
+	// Subscription management
+	activeSubCtx  context.Context    // Context for active subscriptions
+	cancelSubs    context.CancelFunc  // Function to cancel all active subscriptions
 }
 
 func NewModel() Model {
@@ -128,7 +131,7 @@ func NewModel() Model {
 		currentView: viewFollowing,
 		signer:      s,
 		pool:        nostr.NewSimplePool(context.Background()),
-		relays:      []string{"wss://relay.damus.io", "wss://nos.lol", "wss://relay.nostr.band"}, // Default relays
+		relays:      []string{"wss://relay.damus.io", "wss://relay.nostr.band"}, // Default relays (removed nos.lol to reduce load)
 		cursor:      0,
 		userCache:   make(map[string]string),
 		readDMs:     make(map[string]bool),
@@ -1810,6 +1813,12 @@ func fetchProfilesCmd(pool *nostr.SimplePool, relays []string, pubkeys []string)
 			return profilesMsg{profiles: make(map[string]string)}
 		}
 
+		// Limit batch size to avoid overwhelming relays
+		const maxBatchSize = 10
+		if len(pubkeys) > maxBatchSize {
+			pubkeys = pubkeys[:maxBatchSize]
+		}
+
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
@@ -2951,6 +2960,17 @@ func performZapCmd(event *nostr.Event, amountSats int64, nwcString string, relay
 
 		return zapSuccessMsg{}
 	}
+}
+
+// resetSubscriptions cancels all active subscriptions and creates a new context
+func (m *Model) resetSubscriptions() {
+	// Cancel any existing subscriptions
+	if m.cancelSubs != nil {
+		m.cancelSubs()
+	}
+	
+	// Create new context for subscriptions
+	m.activeSubCtx, m.cancelSubs = context.WithCancel(context.Background())
 }
 
 func min(a, b int) int {
