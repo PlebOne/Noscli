@@ -303,6 +303,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.editingNsec = false
 					m.nsecKey = ""
 				case "enter":
+					// Debug: Show raw input before any processing
+					debugInfo := fmt.Sprintf("Raw input (len=%d): ", len(m.nsecKey))
+					for i, r := range m.nsecKey {
+						if i < 30 {
+							debugInfo += fmt.Sprintf("%c(%d) ", r, r)
+						}
+					}
+					m.statusMsg = debugInfo
+					
 					if strings.TrimSpace(m.nsecKey) != "" {
 						// Find and extract nsec from the input (handles bracket paste and other junk)
 						input := strings.TrimSpace(m.nsecKey)
@@ -330,12 +339,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 								m.editingNsec = false
 							}
 						} else {
-							m.statusMsg = "❌ No valid nsec found - must contain 'nsec1'"
+							m.statusMsg = fmt.Sprintf("❌ No 'nsec1' found in: '%s'", input[:min(50, len(input))])
 							m.nsecKey = ""
 							m.editingNsec = false
 						}
 					} else {
-						m.statusMsg = "❌ Please enter an nsec key"
+						m.statusMsg = "❌ Please enter an nsec key (field is empty)"
 						m.editingNsec = false
 					}
 				case "backspace":
