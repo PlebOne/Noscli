@@ -3044,6 +3044,9 @@ func payInvoiceWithSigner(ctx context.Context, nwcString string, invoice string,
 
 	responseChan := pool.SubMany(ctx, []string{relay}, filters)
 
+	// Small delay to ensure subscription is established
+	time.Sleep(500 * time.Millisecond)
+
 	// Publish the request
 	results := pool.PublishMany(ctx, []string{relay}, evt)
 	published := false
@@ -3057,38 +3060,53 @@ func payInvoiceWithSigner(ctx context.Context, nwcString string, invoice string,
 		return fmt.Errorf("failed to publish request to wallet relay")
 	}
 
-	// Wait for response
-	select {
-	case respEvent := <-responseChan:
-		if respEvent.Event == nil {
-			return fmt.Errorf("received empty response")
+	// Wait for response - loop through all events
+	for {
+		select {
+		case respEvent := <-responseChan:
+			if respEvent.Event == nil {
+				continue // Skip empty events
+			}
+
+			// Check if this is a response to our request
+			isResponse := false
+			for _, tag := range respEvent.Event.Tags {
+				if len(tag) >= 2 && tag[0] == "p" && tag[1] == pubKey {
+					isResponse = true
+					break
+				}
+			}
+
+			if !isResponse {
+				continue // Not for us
+			}
+
+			// Decrypt response using Pleb Signer
+			decrypted, err := signer.Nip04Decrypt(walletPubkey, respEvent.Content)
+			if err != nil {
+				return fmt.Errorf("failed to decrypt response: %w", err)
+			}
+
+			// Parse response
+			var response nwc.PayInvoiceResponse
+			if err := json.Unmarshal([]byte(decrypted), &response); err != nil {
+				return fmt.Errorf("failed to parse response: %w", err)
+			}
+
+			// Check for errors
+			if response.Error != nil {
+				return fmt.Errorf("wallet error: %s - %s", response.Error.Code, response.Error.Message)
+			}
+
+			if response.Result == nil {
+				return fmt.Errorf("no result in response")
+			}
+
+			return nil
+
+		case <-ctx.Done():
+			return fmt.Errorf("timeout waiting for wallet response (30s) - check wallet relay and connection")
 		}
-
-		// Decrypt response using Pleb Signer
-		decrypted, err := signer.Nip04Decrypt(walletPubkey, respEvent.Content)
-		if err != nil {
-			return fmt.Errorf("failed to decrypt response: %w", err)
-		}
-
-		// Parse response
-		var response nwc.PayInvoiceResponse
-		if err := json.Unmarshal([]byte(decrypted), &response); err != nil {
-			return fmt.Errorf("failed to parse response: %w", err)
-		}
-
-		// Check for errors
-		if response.Error != nil {
-			return fmt.Errorf("wallet error: %s - %s", response.Error.Code, response.Error.Message)
-		}
-
-		if response.Result == nil {
-			return fmt.Errorf("no result in response")
-		}
-
-		return nil
-
-	case <-ctx.Done():
-		return fmt.Errorf("timeout waiting for wallet response")
 	}
 }
 
