@@ -304,23 +304,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.nsecKey = ""
 				case "enter":
 					if strings.TrimSpace(m.nsecKey) != "" {
-						// Validate nsec format
-						trimmedKey := strings.TrimSpace(m.nsecKey)
+						// Find and extract nsec from the input (handles bracket paste and other junk)
+						input := strings.TrimSpace(m.nsecKey)
 						
-						// Strip bracket paste mode markers and other control characters
-						// Remove any non-alphanumeric characters from start
-						cleanKey := strings.TrimLeftFunc(trimmedKey, func(r rune) bool {
-							return r < '0' || r > 'z' || (r > '9' && r < 'A') || (r > 'Z' && r < 'a')
-						})
-						
-						if strings.HasPrefix(cleanKey, "nsec1") {
-							m.editingNsec = false
-							m.statusMsg = "Decoding nsec key..."
-							// Decode and save the nsec key
-							return m, connectWithNsecCmd(cleanKey)
+						// Look for "nsec1" anywhere in the input
+						nsecIndex := strings.Index(input, "nsec1")
+						if nsecIndex >= 0 {
+							// Extract from "nsec1" to the end, removing any trailing junk
+							cleanKey := input[nsecIndex:]
+							// Remove any non-alphanumeric characters from the end
+							cleanKey = strings.TrimRightFunc(cleanKey, func(r rune) bool {
+								return r < '0' || r > 'z' || (r > '9' && r < 'A') || (r > 'Z' && r < 'a')
+							})
+							
+							// Validate length (nsec should be 63 characters)
+							if len(cleanKey) >= 60 && len(cleanKey) <= 66 {
+								m.editingNsec = false
+								m.statusMsg = "Decoding nsec key..."
+								m.nsecKey = "" // Clear for next time
+								// Decode and save the nsec key
+								return m, connectWithNsecCmd(cleanKey)
+							} else {
+								m.statusMsg = fmt.Sprintf("❌ Invalid nsec length: %d chars (expected ~63)", len(cleanKey))
+								m.nsecKey = ""
+								m.editingNsec = false
+							}
 						} else {
-							m.statusMsg = fmt.Sprintf("❌ Invalid nsec - starts with: '%s' (len=%d)", 
-								cleanKey[:min(20, len(cleanKey))], len(cleanKey))
+							m.statusMsg = "❌ No valid nsec found - must contain 'nsec1'"
 							m.nsecKey = ""
 							m.editingNsec = false
 						}
