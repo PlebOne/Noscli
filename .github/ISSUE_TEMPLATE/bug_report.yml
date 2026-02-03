@@ -1,0 +1,50 @@
+name: Bug Report
+description: Report a bug or issue with Noscli
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug!
+  
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug Description
+      description: A clear description of what the bug is
+    validations:
+      required: true
+  
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      placeholder: |
+        1. Go to '...'
+        2. Click on '...'
+        3. See error
+    validations:
+      required: true
+  
+  - type: input
+    id: version
+    attributes:
+      label: Noscli Version
+      placeholder: v1.0.0
+    validations:
+      required: true
+  
+  - type: dropdown
+    id: auth
+    attributes:
+      label: Authentication Method
+      options:
+        - Pleb Signer (DBus)
+        - Private Key (nsec)
+  
+  - type: textarea
+    id: logs
+    attributes:
+      label: Error Messages / Logs
+      render: shell
