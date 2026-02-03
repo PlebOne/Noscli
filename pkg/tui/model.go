@@ -92,14 +92,17 @@ type Model struct {
 	threadEvents  []nostr.Event      // All events in thread
 	// Landing/Settings
 	landingChoice int                // 0 = Open Client, 1 = Settings
-	settingsMenu  int                // 0 = Auth Method, 1 = Relays
-	settingsCursor int               // Which relay is selected in settings
+	settingsMenu  int                // 0 = Auth, 1 = Relays, 2 = Wallet
+	settingsCursor int               // Which item is selected in settings
 	editingRelay  bool               // Whether we're editing a relay
 	newRelayInput string             // Input for new relay
 	// Auth settings
 	authMethod    string             // "pleb_signer" or "nsec" or ""
 	nsecKey       string             // User's nsec key if authMethod is "nsec"
 	editingNsec   bool               // Whether we're editing nsec input
+	// Wallet settings
+	nwcString     string             // Nostr Wallet Connect connection string
+	editingNWC    bool               // Whether we're editing NWC input
 }
 
 func NewModel() Model {
@@ -366,6 +369,50 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			
+			if m.editingNWC {
+				switch msg.String() {
+				case "esc":
+					m.editingNWC = false
+					m.nwcString = ""
+				case "enter":
+					if strings.TrimSpace(m.nwcString) != "" {
+						// Find and extract nostr+walletconnect:// URL
+						input := strings.TrimSpace(m.nwcString)
+						
+						// Look for "nostr+walletconnect://" anywhere in the input
+						nwcIndex := strings.Index(input, "nostr+walletconnect://")
+						if nwcIndex >= 0 {
+							// Extract from "nostr+walletconnect://" to the end
+							cleanNWC := input[nwcIndex:]
+							// Remove any trailing junk
+							cleanNWC = strings.TrimSpace(cleanNWC)
+							
+							m.nwcString = cleanNWC
+							m.editingNWC = false
+							m.statusMsg = "✓ NWC connection saved!"
+						} else {
+							m.statusMsg = "❌ Invalid NWC format - must start with nostr+walletconnect://"
+							m.nwcString = ""
+							m.editingNWC = false
+						}
+					} else {
+						m.statusMsg = "❌ Please enter a NWC connection string"
+						m.editingNWC = false
+					}
+				case "backspace":
+					if len(m.nwcString) > 0 {
+						m.nwcString = m.nwcString[:len(m.nwcString)-1]
+					}
+				default:
+					// Handle paste events and single character input
+					input := msg.String()
+					if len(input) > 0 {
+						m.nwcString += input
+					}
+				}
+				return m, nil
+			}
+			
 			if m.editingRelay {
 				switch msg.String() {
 				case "esc":
@@ -399,14 +446,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Back to landing
 				m.state = stateLanding
 			case "tab":
-				// Switch between auth and relays menu
-				if m.settingsMenu == 0 {
-					m.settingsMenu = 1
-					m.settingsCursor = 0
-				} else {
-					m.settingsMenu = 0
-					m.settingsCursor = 0
-				}
+				// Cycle through auth, relays, and wallet menus
+				m.settingsMenu = (m.settingsMenu + 1) % 3
+				m.settingsCursor = 0
 			case "up", "k":
 				if m.settingsCursor > 0 {
 					m.settingsCursor--
@@ -448,6 +490,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if m.settingsCursor >= len(m.relays) {
 						m.settingsCursor = len(m.relays) - 1
 					}
+				}
+				// Delete NWC connection (only in wallet menu)
+				if m.settingsMenu == 2 {
+					m.nwcString = ""
+					m.statusMsg = "NWC connection removed"
+				}
+			case "e":
+				// Edit NWC connection (only in wallet menu)
+				if m.settingsMenu == 2 {
+					m.editingNWC = true
+					m.nwcString = ""
 				}
 			}
 			return m, nil
@@ -2479,9 +2532,15 @@ content.WriteString("\n\n")
 if m.settingsMenu == 0 {
 content.WriteString(activeTabStyle.Render("[ Authentication ]"))
 content.WriteString(tabStyle.Render("  Relays  "))
-} else {
+content.WriteString(tabStyle.Render("  Wallet  "))
+} else if m.settingsMenu == 1 {
 content.WriteString(tabStyle.Render("  Authentication  "))
 content.WriteString(activeTabStyle.Render("[ Relays ]"))
+content.WriteString(tabStyle.Render("  Wallet  "))
+} else {
+content.WriteString(tabStyle.Render("  Authentication  "))
+content.WriteString(tabStyle.Render("  Relays  "))
+content.WriteString(activeTabStyle.Render("[ Wallet ]"))
 }
 content.WriteString(footerStyle.Render("  (Tab to switch)"))
 content.WriteString("\n\n")
@@ -2552,7 +2611,7 @@ content.WriteString("\n")
 content.WriteString(footerStyle.Render("↑/↓ nav • Enter select • Tab → Relays • Esc back"))
 }
 
-} else {
+} else if m.settingsMenu == 1 {
 // Relays menu
 content.WriteString(headerStyle.Render("Nostr Relays:"))
 content.WriteString("\n\n")
@@ -2582,6 +2641,33 @@ content.WriteString(footerStyle.Render("↑/↓ navigate • a add relay • d/x
 } else {
 content.WriteString(footerStyle.Render("↑/↓ navigate • a add relay • d/x delete • Enter start client • Esc/q back"))
 }
+}
+
+} else {
+// Wallet menu
+content.WriteString(headerStyle.Render("Nostr Wallet Connect (NWC):"))
+content.WriteString("\n\n")
+
+if m.editingNWC {
+content.WriteString(headerStyle.Render("Enter NWC connection string:"))
+content.WriteString("\n")
+// Show masked connection string
+maskedNWC := strings.Repeat("*", len(m.nwcString))
+content.WriteString(itemStyle.Render(fmt.Sprintf("> %s_", maskedNWC)))
+content.WriteString("\n")
+content.WriteString(footerStyle.Render("Enter to save • Esc to cancel • Paste nostr+walletconnect://..."))
+} else {
+if m.nwcString != "" {
+content.WriteString(activeStyle.Render("✓ NWC Connected"))
+content.WriteString("\n\n")
+content.WriteString(itemStyle.Render("Press 'e' to edit or 'd' to delete"))
+} else {
+content.WriteString(itemStyle.Render("Press 'e' to add NWC connection string"))
+content.WriteString("\n\n")
+content.WriteString(footerStyle.Render("💡 Get your NWC string from Alby, Mutiny, or your wallet"))
+}
+content.WriteString("\n\n")
+content.WriteString(footerStyle.Render("Tab to switch • Esc/q back"))
 }
 }
 
