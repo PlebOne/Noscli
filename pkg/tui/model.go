@@ -307,20 +307,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						// Validate nsec format
 						trimmedKey := strings.TrimSpace(m.nsecKey)
 						
-						// Debug: Show what we have
-						m.statusMsg = fmt.Sprintf("Debug: len=%d, first 10 chars='%s', starts with nsec1=%v", 
-							len(trimmedKey), 
-							trimmedKey[:min(10, len(trimmedKey))],
-							strings.HasPrefix(trimmedKey, "nsec1"))
+						// Strip bracket paste mode markers and other control characters
+						// Remove any non-alphanumeric characters from start
+						cleanKey := strings.TrimLeftFunc(trimmedKey, func(r rune) bool {
+							return r < '0' || r > 'z' || (r > '9' && r < 'A') || (r > 'Z' && r < 'a')
+						})
 						
-						if strings.HasPrefix(trimmedKey, "nsec1") {
+						if strings.HasPrefix(cleanKey, "nsec1") {
 							m.editingNsec = false
 							m.statusMsg = "Decoding nsec key..."
 							// Decode and save the nsec key
-							return m, connectWithNsecCmd(trimmedKey)
+							return m, connectWithNsecCmd(cleanKey)
 						} else {
 							m.statusMsg = fmt.Sprintf("❌ Invalid nsec - starts with: '%s' (len=%d)", 
-								trimmedKey[:min(20, len(trimmedKey))], len(trimmedKey))
+								cleanKey[:min(20, len(cleanKey))], len(cleanKey))
 							m.nsecKey = ""
 							m.editingNsec = false
 						}
