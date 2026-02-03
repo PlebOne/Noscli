@@ -11,7 +11,7 @@ A command-line Nostr client built with Go and Charm tools (Bubble Tea, Lip Gloss
 - **Post & Reply**: Compose new posts and reply to existing posts/DMs with full threading support.
 - **Thread View**: View full conversation threads with all replies in chronological order.
 - **Repost & Quote**: Boost posts or add your thoughts with quote reposts.
-- **Encrypted DMs**: Send and view encrypted direct messages using NIP-04 encryption.
+- **Encrypted DMs**: Send and view encrypted direct messages using NIP-04 encryption (legacy) with NIP-17 support coming soon.
 - **Following List**: Automatically loads your contact list (kind 3) and shows posts from people you follow.
 - **Notifications**: See mentions, replies, and reactions to your posts.
 - **Username Display**: Fetches and caches user profiles (kind 0) to show display names instead of pubkeys.
@@ -212,7 +212,7 @@ When a post contains multiple URLs (images, videos, links), they are displayed w
 - Uses Pleb Signer's D-Bus API for secure key management
 - Three main views accessible via Tab key:
   - **Following**: Posts from people you follow (kind 1 from contact list)
-  - **DMs**: Encrypted direct messages (kind 4) - sent and received
+  - **DMs**: Encrypted direct messages (kind 4 NIP-04, kind 1059 NIP-17) - sent and received
   - **Notifications**: Mentions, replies (kind 1 with 'p' tag), and reactions (kind 7)
 - Robust error handling with panic recovery for relay operations
 - Fetches your contact list (kind 3 event) to show posts from people you follow
@@ -240,8 +240,14 @@ When a post contains multiple URLs (images, videos, links), they are displayed w
 - Publishing capabilities:
   - Create new posts (kind 1)
   - Reply to posts with proper threading tags
-  - Send encrypted DMs (kind 4) using NIP-04
-  - All signing and encryption handled by Pleb Signer via DBus
+  - Repost (kind 6) and quote repost posts
+  - Send encrypted DMs (kind 4 NIP-04)
+  - All signing and encryption handled by either Pleb Signer (DBus) or direct nsec key
+- DM Encryption:
+  - **NIP-04** (kind 4): Legacy encrypted DMs - fully supported for send/receive
+  - **NIP-17** (kind 1059/14): Modern gift-wrapped DMs with NIP-44 encryption - detection added, full support coming soon
+  - Automatically detects sent vs received DMs to use correct decryption key
+  - Works with both Pleb Signer and nsec authentication modes
 
 ## Media Support Details
 
@@ -303,6 +309,7 @@ This client currently uses an in-memory pool for simplicity as there are no offi
 - Install `chafa` for terminal playback: `sudo pacman -S chafa` (Arch)
 - Or let mpv handle them (already installed)
 
-**DMs show as encrypted text**
-- DMs are currently shown encrypted (as stored in kind 4 events)
-- Future enhancement: Decrypt using Pleb Signer's NIP-04/NIP-44 methods
+**DMs show as encrypted text or fail to decrypt**
+- NIP-04 (kind 4) DMs should now decrypt automatically
+- If decryption fails, ensure Pleb Signer is running and unlocked
+- NIP-17 (kind 1059) gift-wrapped DMs show a placeholder - full support coming soon
