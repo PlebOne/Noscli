@@ -5,6 +5,7 @@ A command-line Nostr client built with Go and Charm tools (Bubble Tea, Lip Gloss
 ## Features
 - **Landing Screen**: Beautiful welcome screen with app info and quick access to client or settings.
 - **Dual Authentication**: Choose between Pleb Signer (DBus) or direct nsec key input.
+- **Settings Persistence**: All settings auto-save to `~/.config/noscli/config.json` - never re-enter your config!
 - **Settings**: Configure authentication method, Nostr relays, and Nostr Wallet Connect - add, remove, and manage connections.
 - **Pleb Signer Integration**: Secure login using [Pleb Signer](https://github.com/PlebOne/Pleb_Signer) via DBus (optional).
 - **Lightning Zaps ⚡**: Send satoshis to support posts you like using Nostr Wallet Connect (NIP-47/NIP-57).
@@ -258,6 +259,32 @@ When a post contains multiple URLs (images, videos, links), they are displayed w
 - Press `Enter` to open the first URL (quick access)
 - Press `1`, `2`, `3`, etc. to open a specific numbered URL
 - Up to 9 URLs can be accessed via number keys
+
+## Configuration
+
+Noscli automatically saves all your settings to: `~/.config/noscli/config.json`
+
+**What's saved:**
+- Authentication method (Pleb Signer or nsec)
+- nsec key (if using nsec authentication)
+- Relay list
+- NWC connection string
+
+**File permissions:**
+- Config directory: `0700` (your user only)
+- Config file: `0600` (your user read/write only)
+
+**Security note:** If using nsec authentication, your private key is stored in **plaintext** in the config file. The file is only readable by your user account, but you should be aware of this. If this concerns you, use Pleb Signer authentication instead - it never stores your private key.
+
+**Manual editing:** You can edit the config file directly if needed:
+```bash
+nano ~/.config/noscli/config.json
+```
+
+**Clear config:** To start fresh, delete the config file:
+```bash
+rm ~/.config/noscli/config.json
+```
 
 ## Technical Details
 
