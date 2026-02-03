@@ -3097,16 +3097,16 @@ func payInvoiceWithSigner(ctx context.Context, nwcString string, invoice string,
 	// Subscribe to wallet responses FIRST, without Since filter to catch all responses
 	log.Printf("👂 [Signer NWC] Subscribing to wallet responses...")
 	
-	// Don't use Since - we want to catch the response whenever it comes
+	// Simplified filter - some relays don't support tag filtering properly
+	// Just get ALL kind 23195 events from the wallet and we'll filter in code
 	filters := []nostr.Filter{{
 		Kinds:   []int{23195}, // NIP-47 response kind
 		Authors: []string{walletPubkey},
-		Tags:    nostr.TagMap{"p": []string{pubKey}},
-		// No Since filter - let's catch everything
+		// Removed 'p' tag filter - relay might not support it
 	}}
 
-	log.Printf("📋 [Signer NWC] Subscription filter: kinds=[23195], authors=[%s], p=[%s]", 
-		walletPubkey[:8], pubKey[:8])
+	log.Printf("📋 [Signer NWC] Subscription filter: kinds=[23195], authors=[%s] (no tag filter)", 
+		walletPubkey[:8])
 	
 	// Use SubManyEose to get all existing events first, then stay open for new ones
 	// Actually, let's use SubMany but add a ticker to check if channel is alive

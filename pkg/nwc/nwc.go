@@ -148,13 +148,11 @@ func (c *NWCClient) PayInvoice(ctx context.Context, invoice string) error {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	// Subscribe to responses
-	since := nostr.Now()
+	// Subscribe to responses - simplified filter without tag filtering
 	filters := []nostr.Filter{{
 		Kinds:   []int{23195}, // NIP-47 response kind
 		Authors: []string{c.walletPubkey},
-		Tags:    nostr.TagMap{"p": []string{evt.PubKey}},
-		Since:   &since,
+		// Removed 'p' tag and 'Since' filters - some relays don't support them
 	}}
 
 	responseChan := c.pool.SubMany(ctx, []string{c.relay}, filters)
