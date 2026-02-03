@@ -306,13 +306,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if strings.TrimSpace(m.nsecKey) != "" {
 						// Validate nsec format
 						trimmedKey := strings.TrimSpace(m.nsecKey)
+						
+						// Debug: Show what we have
+						m.statusMsg = fmt.Sprintf("Debug: len=%d, first 10 chars='%s', starts with nsec1=%v", 
+							len(trimmedKey), 
+							trimmedKey[:min(10, len(trimmedKey))],
+							strings.HasPrefix(trimmedKey, "nsec1"))
+						
 						if strings.HasPrefix(trimmedKey, "nsec1") {
 							m.editingNsec = false
 							m.statusMsg = "Decoding nsec key..."
 							// Decode and save the nsec key
 							return m, connectWithNsecCmd(trimmedKey)
 						} else {
-							m.statusMsg = "❌ Invalid nsec format - must start with nsec1"
+							m.statusMsg = fmt.Sprintf("❌ Invalid nsec - starts with: '%s' (len=%d)", 
+								trimmedKey[:min(20, len(trimmedKey))], len(trimmedKey))
 							m.nsecKey = ""
 							m.editingNsec = false
 						}
@@ -2596,4 +2604,11 @@ func (m *Model) decryptDM(ciphertext, otherPubkey string) (string, error) {
 		// Use Pleb Signer (note: signature is senderPubKey first, then ciphertext)
 		return m.signer.Nip04Decrypt(otherPubkey, ciphertext)
 	}
+}
+
+func min(a, b int) int {
+if a < b {
+return a
+}
+return b
 }
