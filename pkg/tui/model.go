@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -2908,11 +2909,13 @@ func (m *Model) decryptDM(ciphertext, otherPubkey string) (string, error) {
 // performZapCmd executes a zap payment
 func performZapCmd(event *nostr.Event, amountSats int64, nwcString string, relays []string, pubKey string, privKey string, authMethod string, signer *signer.PlebSigner) tea.Cmd {
 	return func() tea.Msg {
+		log.Printf("🚀 Starting zap flow: amount=%d sats, auth=%s", amountSats, authMethod)
 		ctx := context.Background()
 
 		// Get the recipient's profile metadata to find lightning address
 		var lightningAddress string
 		
+		log.Printf("🔍 Fetching recipient profile for lightning address...")
 		// Try to fetch profile from our relays
 		filters := []nostr.Filter{{
 			Kinds:   []int{0}, // Profile metadata
@@ -2928,33 +2931,43 @@ func performZapCmd(event *nostr.Event, amountSats int64, nwcString string, relay
 		case evt := <-eventChan:
 			if evt.Event != nil {
 				lightningAddress = zap.GetLightningAddress(evt.Content)
+				log.Printf("✅ Found lightning address: %s", lightningAddress)
 			}
 		case <-timeout:
-			// No profile found, try to continue anyway
+			log.Printf("⏱️  Profile fetch timeout")
 		}
 
 		if lightningAddress == "" {
+			log.Printf("❌ No lightning address found")
 			return zapErrorMsg{err: fmt.Errorf("recipient has no lightning address in profile")}
 		}
 
 		// Get LNURL endpoint
+		log.Printf("🔗 Getting LNURL endpoint...")
 		lnurlEndpoint, err := zap.GetLNURL(lightningAddress)
 		if err != nil {
+			log.Printf("❌ Invalid lightning address: %v", err)
 			return zapErrorMsg{err: fmt.Errorf("invalid lightning address: %w", err)}
 		}
+		log.Printf("✅ LNURL endpoint: %s", lnurlEndpoint)
 
 		// Fetch LNURL info
+		log.Printf("📡 Fetching LNURL info...")
 		lnurlInfo, err := zap.FetchLNURLPayInfo(lnurlEndpoint)
 		if err != nil {
+			log.Printf("❌ Failed to fetch LNURL info: %v", err)
 			return zapErrorMsg{err: fmt.Errorf("failed to fetch LNURL info: %w", err)}
 		}
+		log.Printf("✅ LNURL callback: %s", lnurlInfo.Callback)
 
 		// Create zap request - different approach based on auth method
+		log.Printf("📝 Creating zap request (auth: %s)...", authMethod)
 		var zapRequest *nostr.Event
 		if authMethod == "nsec" && privKey != "" {
 			// Use private key directly
 			zapRequest, err = zap.CreateZapRequest(event.PubKey, event.ID, "⚡", amountSats, relays, privKey)
 			if err != nil {
+				log.Printf("❌ Failed to create zap request: %v", err)
 				return zapErrorMsg{err: fmt.Errorf("failed to create zap request: %w", err)}
 			}
 		} else {
@@ -2977,44 +2990,60 @@ func performZapCmd(event *nostr.Event, amountSats int64, nwcString string, relay
 			}
 			// Sign with Pleb Signer
 			if err := signer.SignEvent(zapRequest); err != nil {
+				log.Printf("❌ Failed to sign zap request: %v", err)
 				return zapErrorMsg{err: fmt.Errorf("failed to sign zap request: %w", err)}
 			}
 		}
+		log.Printf("✅ Zap request created and signed")
 
 		// Get invoice
+		log.Printf("💰 Requesting invoice...")
 		invoice, err := zap.GetInvoice(lnurlInfo.Callback, amountSats, zapRequest)
 		if err != nil {
+			log.Printf("❌ Failed to get invoice: %v", err)
 			return zapErrorMsg{err: fmt.Errorf("failed to get invoice: %w", err)}
 		}
+		log.Printf("✅ Invoice received: %s...", invoice[:20])
 
 		// Pay invoice via NWC - different approach based on auth method
+		log.Printf("💸 Paying invoice via NWC (auth: %s)...", authMethod)
 		if authMethod == "nsec" && privKey != "" {
 			// Use NWC client with private key
+			log.Printf("🔑 Creating NWC client with nsec...")
 			nwcClient, err := nwc.NewNWCClient(nwcString)
 			if err != nil {
+				log.Printf("❌ Failed to create NWC client: %v", err)
 				return zapErrorMsg{err: fmt.Errorf("failed to create NWC client: %w", err)}
 			}
+			log.Printf("✅ NWC client created, calling PayInvoice...")
 			if err := nwcClient.PayInvoice(ctx, invoice); err != nil {
+				log.Printf("❌ PayInvoice failed: %v", err)
 				return zapErrorMsg{err: fmt.Errorf("failed to pay invoice: %w", err)}
 			}
 		} else {
 			// Use NWC with Pleb Signer
+			log.Printf("🔏 Using Pleb Signer for NWC...")
 			if err := payInvoiceWithSigner(ctx, nwcString, invoice, pubKey, signer); err != nil {
+				log.Printf("❌ payInvoiceWithSigner failed: %v", err)
 				return zapErrorMsg{err: fmt.Errorf("failed to pay invoice: %w", err)}
 			}
 		}
 
+		log.Printf("🎉 Zap successful!")
 		return zapSuccessMsg{}
 	}
 }
 
 // payInvoiceWithSigner pays an invoice via NWC using Pleb Signer for encryption/signing
 func payInvoiceWithSigner(ctx context.Context, nwcString string, invoice string, pubKey string, signer *signer.PlebSigner) error {
+	log.Printf("📋 [Signer NWC] Parsing NWC string...")
 	// Parse NWC string
 	walletPubkey, relay, _, err := nwc.ParseNWCString(nwcString)
 	if err != nil {
+		log.Printf("❌ [Signer NWC] Failed to parse: %v", err)
 		return fmt.Errorf("failed to parse NWC string: %w", err)
 	}
+	log.Printf("✅ [Signer NWC] Wallet pubkey: %s, relay: %s", walletPubkey[:8], relay)
 
 	// Create the payment request
 	requestContent := nwc.PayInvoiceRequest{
@@ -3026,14 +3055,19 @@ func payInvoiceWithSigner(ctx context.Context, nwcString string, invoice string,
 
 	contentBytes, err := json.Marshal(requestContent)
 	if err != nil {
+		log.Printf("❌ [Signer NWC] Marshal failed: %v", err)
 		return fmt.Errorf("failed to marshal request: %w", err)
 	}
+	log.Printf("📦 [Signer NWC] Request content: %s", string(contentBytes))
 
 	// Encrypt using Pleb Signer
+	log.Printf("🔐 [Signer NWC] Encrypting with Pleb Signer...")
 	encryptedContent, err := signer.Nip04Encrypt(walletPubkey, string(contentBytes))
 	if err != nil {
+		log.Printf("❌ [Signer NWC] Encryption failed: %v", err)
 		return fmt.Errorf("failed to encrypt content: %w", err)
 	}
+	log.Printf("✅ [Signer NWC] Content encrypted")
 
 	// Create NWC request event (kind 23194)
 	evt := nostr.Event{
@@ -3047,9 +3081,12 @@ func payInvoiceWithSigner(ctx context.Context, nwcString string, invoice string,
 	}
 
 	// Sign with Pleb Signer
+	log.Printf("✍️  [Signer NWC] Signing event with Pleb Signer...")
 	if err := signer.SignEvent(&evt); err != nil {
+		log.Printf("❌ [Signer NWC] Signing failed: %v", err)
 		return fmt.Errorf("failed to sign event: %w", err)
 	}
+	log.Printf("✅ [Signer NWC] Event signed")
 
 	// Publish and wait for response
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -3058,6 +3095,7 @@ func payInvoiceWithSigner(ctx context.Context, nwcString string, invoice string,
 	pool := nostr.NewSimplePool(ctx)
 	
 	// Subscribe to wallet responses
+	log.Printf("👂 [Signer NWC] Subscribing to wallet responses...")
 	since := nostr.Now()
 	filters := []nostr.Filter{{
 		Kinds:   []int{23195}, // NIP-47 response kind
@@ -3067,30 +3105,45 @@ func payInvoiceWithSigner(ctx context.Context, nwcString string, invoice string,
 	}}
 
 	responseChan := pool.SubMany(ctx, []string{relay}, filters)
+	log.Printf("✅ [Signer NWC] Subscribed to wallet relay")
 
 	// Small delay to ensure subscription is established
 	time.Sleep(500 * time.Millisecond)
 
 	// Publish the request
+	log.Printf("📤 [Signer NWC] Publishing payment request to %s...", relay)
 	results := pool.PublishMany(ctx, []string{relay}, evt)
 	published := false
 	for result := range results {
 		if result.Error == nil {
 			published = true
+			log.Printf("✅ [Signer NWC] Published successfully")
+		} else {
+			log.Printf("❌ [Signer NWC] Publish error: %v", result.Error)
 		}
 	}
 	
 	if !published {
+		log.Printf("❌ [Signer NWC] Failed to publish to wallet relay")
 		return fmt.Errorf("failed to publish request to wallet relay")
 	}
 
+	log.Printf("⏳ [Signer NWC] Waiting for wallet response (timeout: 30s)...")
+	eventCount := 0
+	
 	// Wait for response - loop through all events
 	for {
 		select {
 		case respEvent := <-responseChan:
+			eventCount++
+			log.Printf("📨 [Signer NWC] Received event #%d", eventCount)
+			
 			if respEvent.Event == nil {
+				log.Printf("⚠️  [Signer NWC] Event #%d is nil, skipping", eventCount)
 				continue // Skip empty events
 			}
+
+			log.Printf("📋 [Signer NWC] Event #%d: kind=%d, author=%s", eventCount, respEvent.Event.Kind, respEvent.Event.PubKey[:8])
 
 			// Check if this is a response to our request
 			isResponse := false
@@ -3102,34 +3155,44 @@ func payInvoiceWithSigner(ctx context.Context, nwcString string, invoice string,
 			}
 
 			if !isResponse {
+				log.Printf("⚠️  [Signer NWC] Event #%d not for us (no matching p tag)", eventCount)
 				continue // Not for us
 			}
 
+			log.Printf("✅ [Signer NWC] Event #%d is for us! Decrypting...", eventCount)
+			
 			// Decrypt response using Pleb Signer
 			decrypted, err := signer.Nip04Decrypt(walletPubkey, respEvent.Content)
 			if err != nil {
+				log.Printf("❌ [Signer NWC] Decryption failed: %v", err)
 				return fmt.Errorf("failed to decrypt response: %w", err)
 			}
+			log.Printf("📄 [Signer NWC] Decrypted: %s", decrypted)
 
 			// Parse response
 			var response nwc.PayInvoiceResponse
 			if err := json.Unmarshal([]byte(decrypted), &response); err != nil {
+				log.Printf("❌ [Signer NWC] JSON parse failed: %v", err)
 				return fmt.Errorf("failed to parse response: %w", err)
 			}
 
 			// Check for errors
 			if response.Error != nil {
+				log.Printf("❌ [Signer NWC] Wallet error: %s - %s", response.Error.Code, response.Error.Message)
 				return fmt.Errorf("wallet error: %s - %s", response.Error.Code, response.Error.Message)
 			}
 
 			if response.Result == nil {
+				log.Printf("❌ [Signer NWC] No result in response")
 				return fmt.Errorf("no result in response")
 			}
 
+			log.Printf("✅ [Signer NWC] Payment successful!")
 			return nil
 
 		case <-ctx.Done():
-			return fmt.Errorf("timeout waiting for wallet response (30s) - check wallet relay and connection")
+			log.Printf("⏱️  [Signer NWC] Timeout after receiving %d events", eventCount)
+			return fmt.Errorf("timeout waiting for wallet response (30s) - received %d events but none matched", eventCount)
 		}
 	}
 }
