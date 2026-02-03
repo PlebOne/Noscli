@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,7 +22,9 @@ import (
 	"github.com/nbd-wtf/go-nostr/nip19"
 	"github.com/nbd-wtf/go-nostr/nip44"
 	"github.com/nbd-wtf/go-nostr/nip59"
+	"noscli/pkg/nwc"
 	"noscli/pkg/signer"
+	"noscli/pkg/zap"
 )
 
 const Version = "1.0.0"
@@ -103,6 +106,10 @@ type Model struct {
 	// Wallet settings
 	nwcString     string             // Nostr Wallet Connect connection string
 	editingNWC    bool               // Whether we're editing NWC input
+	// Zapping
+	zapAmount     string             // Amount input for zapping
+	zappingEvent  *nostr.Event       // Event being zapped
+	editingZapAmt bool               // Whether we're entering zap amount
 }
 
 func NewModel() Model {
@@ -592,6 +599,42 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		
+		// Zap amount input handling
+		if m.editingZapAmt {
+			switch msg.String() {
+			case "esc":
+				m.editingZapAmt = false
+				m.zapAmount = ""
+				m.zappingEvent = nil
+				m.statusMsg = ""
+				return m, nil
+			case "enter":
+				// Parse amount and initiate zap
+				amount, err := strconv.ParseInt(m.zapAmount, 10, 64)
+				if err != nil || amount <= 0 {
+					m.statusMsg = "⚠️ Invalid amount"
+					return m, nil
+				}
+				m.editingZapAmt = false
+				m.statusMsg = "⚡ Zapping..."
+				return m, performZapCmd(m.zappingEvent, amount, m.nwcString, m.relays, m.pubKey, m.privKey, m.authMethod, m.signer)
+			case "backspace":
+				if len(m.zapAmount) > 0 {
+					m.zapAmount = m.zapAmount[:len(m.zapAmount)-1]
+				}
+				return m, nil
+			default:
+				// Only accept digits
+				if len(msg.String()) == 1 {
+					ch := msg.String()[0]
+					if ch >= '0' && ch <= '9' {
+						m.zapAmount += msg.String()
+					}
+				}
+				return m, nil
+			}
+		}
+		
 		// Normal mode key handling
 		switch msg.String() {
 		case "q", "ctrl+c":
@@ -604,6 +647,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.textarea.Placeholder = "What's on your mind? (Ctrl+S to send, Esc to cancel)"
 			m.textarea.Focus()
 			m.statusMsg = "Composing new post"
+			return m, nil
+		case "z":
+			// Zap selected post
+			if m.nwcString == "" {
+				m.statusMsg = "⚠️ No wallet connected. Add NWC in Settings → Wallet"
+				return m, nil
+			}
+			currentEvents := m.getCurrentEvents()
+			if len(currentEvents) > 0 && m.cursor < len(currentEvents) {
+				evt := currentEvents[m.cursor]
+				m.zappingEvent = &evt
+				m.editingZapAmt = true
+				m.zapAmount = "21" // Default 21 sats
+				m.statusMsg = "Enter zap amount (sats): "
+			}
 			return m, nil
 		case "R":
 			// Reply to selected post or DM
@@ -1067,6 +1125,19 @@ case notificationsMsg:
 		case viewNotifications:
 			return m, fetchNotificationsCmd(m.pool, m.relays, m.pubKey)
 		}
+	
+	case zapSuccessMsg:
+		m.statusMsg = "⚡ Zap sent successfully!"
+		m.zapAmount = ""
+		m.zappingEvent = nil
+		return m, nil
+	
+	case zapErrorMsg:
+		m.statusMsg = fmt.Sprintf("⚠️ Zap failed: %v", msg.err)
+		m.zapAmount = ""
+		m.zappingEvent = nil
+		m.editingZapAmt = false
+		return m, nil
 	}
 
 	return m, nil
@@ -1216,10 +1287,16 @@ func (m Model) View() string {
 
 	tabs := lipgloss.JoinHorizontal(lipgloss.Top, followingTab, dmsTab, notificationsTab)
 
+	// Show zap amount input if active
+	statusDisplay := m.statusMsg
+	if m.editingZapAmt {
+		statusDisplay = fmt.Sprintf("⚡ Zap amount (sats): %s_ (Enter to confirm, Esc to cancel)", m.zapAmount)
+	}
+
 	header := lipgloss.NewStyle().
 		Bold(true).
 		Foreground(lipgloss.Color("205")).
-		Render(fmt.Sprintf("Noscli - %s", m.statusMsg))
+		Render(fmt.Sprintf("Noscli - %s", statusDisplay))
 
 	// Create responsive footer that wraps based on width
 	footer := m.renderFooter()
@@ -1231,6 +1308,14 @@ func (m *Model) renderFooter() string {
 	commands := []string{
 		"c compose",
 		"R reply",
+	}
+	
+	// Add zap command if NWC is connected
+	if m.nwcString != "" {
+		commands = append(commands, "z zap")
+	}
+	
+	commands = append(commands,
 		"x repost",
 		"X quote",
 		"t thread",
@@ -1241,7 +1326,7 @@ func (m *Model) renderFooter() string {
 		"r refresh",
 		"enter/1-9 open",
 		"q quit",
-	}
+	)
 	
 	// Calculate available width (leave some margin)
 	availableWidth := m.width - 4
@@ -2716,6 +2801,12 @@ pubKey  string
 privKey string
 }
 
+type zapSuccessMsg struct{}
+
+type zapErrorMsg struct {
+err error
+}
+
 // signEvent signs an event using either Pleb Signer or direct nsec key
 
 // signEvent signs an event using either Pleb Signer or direct nsec key
@@ -2778,6 +2869,87 @@ func (m *Model) decryptDM(ciphertext, otherPubkey string) (string, error) {
 	} else {
 		// Use Pleb Signer (note: signature is senderPubKey first, then ciphertext)
 		return m.signer.Nip04Decrypt(otherPubkey, ciphertext)
+	}
+}
+
+// performZapCmd executes a zap payment
+func performZapCmd(event *nostr.Event, amountSats int64, nwcString string, relays []string, pubKey string, privKey string, authMethod string, signer *signer.PlebSigner) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+
+		// Get private key for signing
+		var signingKey string
+		if authMethod == "nsec" && privKey != "" {
+			signingKey = privKey
+		} else {
+			// For Pleb Signer, we need to get the private key
+			// This is a limitation - NWC requires direct private key access
+			// For now, we'll return an error
+			return zapErrorMsg{err: fmt.Errorf("zapping with Pleb Signer not yet supported, please use nsec auth")}
+		}
+
+		// Get the recipient's profile metadata to find lightning address
+		var lightningAddress string
+		
+		// Try to fetch profile from our relays
+		filters := []nostr.Filter{{
+			Kinds:   []int{0}, // Profile metadata
+			Authors: []string{event.PubKey},
+			Limit:   1,
+		}}
+
+		pool := nostr.NewSimplePool(ctx)
+		eventChan := pool.SubManyEose(ctx, relays, filters)
+		
+		timeout := time.After(5 * time.Second)
+		select {
+		case evt := <-eventChan:
+			if evt.Event != nil {
+				lightningAddress = zap.GetLightningAddress(evt.Content)
+			}
+		case <-timeout:
+			// No profile found, try to continue anyway
+		}
+
+		if lightningAddress == "" {
+			return zapErrorMsg{err: fmt.Errorf("recipient has no lightning address in profile")}
+		}
+
+		// Get LNURL endpoint
+		lnurlEndpoint, err := zap.GetLNURL(lightningAddress)
+		if err != nil {
+			return zapErrorMsg{err: fmt.Errorf("invalid lightning address: %w", err)}
+		}
+
+		// Fetch LNURL info
+		lnurlInfo, err := zap.FetchLNURLPayInfo(lnurlEndpoint)
+		if err != nil {
+			return zapErrorMsg{err: fmt.Errorf("failed to fetch LNURL info: %w", err)}
+		}
+
+		// Create zap request
+		zapRequest, err := zap.CreateZapRequest(event.PubKey, event.ID, "⚡", amountSats, relays, signingKey)
+		if err != nil {
+			return zapErrorMsg{err: fmt.Errorf("failed to create zap request: %w", err)}
+		}
+
+		// Get invoice
+		invoice, err := zap.GetInvoice(lnurlInfo.Callback, amountSats, zapRequest)
+		if err != nil {
+			return zapErrorMsg{err: fmt.Errorf("failed to get invoice: %w", err)}
+		}
+
+		// Pay invoice via NWC
+		nwcClient, err := nwc.NewNWCClient(nwcString)
+		if err != nil {
+			return zapErrorMsg{err: fmt.Errorf("failed to create NWC client: %w", err)}
+		}
+
+		if err := nwcClient.PayInvoice(ctx, invoice); err != nil {
+			return zapErrorMsg{err: fmt.Errorf("failed to pay invoice: %w", err)}
+		}
+
+		return zapSuccessMsg{}
 	}
 }
 
