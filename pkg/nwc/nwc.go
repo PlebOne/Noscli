@@ -187,18 +187,28 @@ func (c *NWCClient) PayInvoice(ctx context.Context, invoice string) error {
 			}
 
 			log.Printf("📋 Event kind: %d, author: %s", event.Event.Kind, event.Event.PubKey[:8])
+			log.Printf("   Tags: %v", event.Event.Tags)
 
 			// Check if this is a response to our request
+			// Look for EITHER a 'p' tag with our pubkey OR an 'e' tag with our request event ID
 			isResponse := false
 			for _, tag := range event.Event.Tags {
-				if len(tag) >= 2 && tag[0] == "p" && tag[1] == evt.PubKey {
-					isResponse = true
-					break
+				if len(tag) >= 2 {
+					if tag[0] == "p" && tag[1] == evt.PubKey {
+						log.Printf("   ✅ Found matching p tag: %s", tag[1][:8])
+						isResponse = true
+						break
+					}
+					if tag[0] == "e" && tag[1] == evt.ID {
+						log.Printf("   ✅ Found matching e tag: %s", tag[1][:8])
+						isResponse = true
+						break
+					}
 				}
 			}
 
 			if !isResponse {
-				log.Printf("⚠️  Event #%d not addressed to us (no matching p tag)", eventCount)
+				log.Printf("⚠️  Event #%d not addressed to us (no matching p or e tag)", eventCount)
 				continue // Not for us
 			}
 

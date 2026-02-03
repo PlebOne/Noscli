@@ -3168,13 +3168,25 @@ func payInvoiceWithSigner(ctx context.Context, nwcString string, invoice string,
 			}
 
 			log.Printf("📋 [Signer NWC] Event #%d: kind=%d, author=%s", eventCount, respEvent.Event.Kind, respEvent.Event.PubKey[:8])
+			
+			// Log all tags for debugging
+			log.Printf("   Tags: %v", respEvent.Event.Tags)
 
 			// Check if this is a response to our request
+			// Look for EITHER a 'p' tag with our pubkey OR an 'e' tag with our request event ID
 			isResponse := false
 			for _, tag := range respEvent.Event.Tags {
-				if len(tag) >= 2 && tag[0] == "p" && tag[1] == pubKey {
-					isResponse = true
-					break
+				if len(tag) >= 2 {
+					if tag[0] == "p" && tag[1] == pubKey {
+						log.Printf("   ✅ Found matching p tag: %s", tag[1][:8])
+						isResponse = true
+						break
+					}
+					if tag[0] == "e" && tag[1] == evt.ID {
+						log.Printf("   ✅ Found matching e tag: %s", tag[1][:8])
+						isResponse = true
+						break
+					}
 				}
 			}
 
