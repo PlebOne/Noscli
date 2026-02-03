@@ -243,7 +243,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		
-		headerHeight := 3
+		headerHeight := 5  // Header + tabs + spacing
 		// Footer height depends on width - estimate based on commands
 		footerHeight := m.estimateFooterHeight()
 		verticalMarginHeight := headerHeight + footerHeight
