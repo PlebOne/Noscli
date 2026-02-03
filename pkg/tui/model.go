@@ -2886,17 +2886,6 @@ func performZapCmd(event *nostr.Event, amountSats int64, nwcString string, relay
 	return func() tea.Msg {
 		ctx := context.Background()
 
-		// Get private key for signing
-		var signingKey string
-		if authMethod == "nsec" && privKey != "" {
-			signingKey = privKey
-		} else {
-			// For Pleb Signer, we need to get the private key
-			// This is a limitation - NWC requires direct private key access
-			// For now, we'll return an error
-			return zapErrorMsg{err: fmt.Errorf("zapping with Pleb Signer not yet supported, please use nsec auth")}
-		}
-
 		// Get the recipient's profile metadata to find lightning address
 		var lightningAddress string
 		
@@ -2936,10 +2925,36 @@ func performZapCmd(event *nostr.Event, amountSats int64, nwcString string, relay
 			return zapErrorMsg{err: fmt.Errorf("failed to fetch LNURL info: %w", err)}
 		}
 
-		// Create zap request
-		zapRequest, err := zap.CreateZapRequest(event.PubKey, event.ID, "⚡", amountSats, relays, signingKey)
-		if err != nil {
-			return zapErrorMsg{err: fmt.Errorf("failed to create zap request: %w", err)}
+		// Create zap request - different approach based on auth method
+		var zapRequest *nostr.Event
+		if authMethod == "nsec" && privKey != "" {
+			// Use private key directly
+			zapRequest, err = zap.CreateZapRequest(event.PubKey, event.ID, "⚡", amountSats, relays, privKey)
+			if err != nil {
+				return zapErrorMsg{err: fmt.Errorf("failed to create zap request: %w", err)}
+			}
+		} else {
+			// Use Pleb Signer
+			amountMsats := amountSats * 1000
+			zapRequest = &nostr.Event{
+				PubKey:    pubKey,
+				CreatedAt: nostr.Now(),
+				Kind:      9734, // Zap request kind
+				Tags: nostr.Tags{
+					nostr.Tag{"p", event.PubKey},
+					nostr.Tag{"amount", fmt.Sprintf("%d", amountMsats)},
+					nostr.Tag{"e", event.ID},
+				},
+				Content: "⚡",
+			}
+			// Add relay tags
+			for _, relay := range relays {
+				zapRequest.Tags = append(zapRequest.Tags, nostr.Tag{"relays", relay})
+			}
+			// Sign with Pleb Signer
+			if err := signer.SignEvent(zapRequest); err != nil {
+				return zapErrorMsg{err: fmt.Errorf("failed to sign zap request: %w", err)}
+			}
 		}
 
 		// Get invoice
@@ -2948,17 +2963,132 @@ func performZapCmd(event *nostr.Event, amountSats int64, nwcString string, relay
 			return zapErrorMsg{err: fmt.Errorf("failed to get invoice: %w", err)}
 		}
 
-		// Pay invoice via NWC
-		nwcClient, err := nwc.NewNWCClient(nwcString)
-		if err != nil {
-			return zapErrorMsg{err: fmt.Errorf("failed to create NWC client: %w", err)}
-		}
-
-		if err := nwcClient.PayInvoice(ctx, invoice); err != nil {
-			return zapErrorMsg{err: fmt.Errorf("failed to pay invoice: %w", err)}
+		// Pay invoice via NWC - different approach based on auth method
+		if authMethod == "nsec" && privKey != "" {
+			// Use NWC client with private key
+			nwcClient, err := nwc.NewNWCClient(nwcString)
+			if err != nil {
+				return zapErrorMsg{err: fmt.Errorf("failed to create NWC client: %w", err)}
+			}
+			if err := nwcClient.PayInvoice(ctx, invoice); err != nil {
+				return zapErrorMsg{err: fmt.Errorf("failed to pay invoice: %w", err)}
+			}
+		} else {
+			// Use NWC with Pleb Signer
+			if err := payInvoiceWithSigner(ctx, nwcString, invoice, pubKey, signer); err != nil {
+				return zapErrorMsg{err: fmt.Errorf("failed to pay invoice: %w", err)}
+			}
 		}
 
 		return zapSuccessMsg{}
+	}
+}
+
+// payInvoiceWithSigner pays an invoice via NWC using Pleb Signer for encryption/signing
+func payInvoiceWithSigner(ctx context.Context, nwcString string, invoice string, pubKey string, signer *signer.PlebSigner) error {
+	// Parse NWC string
+	walletPubkey, relay, _, err := nwc.ParseNWCString(nwcString)
+	if err != nil {
+		return fmt.Errorf("failed to parse NWC string: %w", err)
+	}
+
+	// Create the payment request
+	requestContent := nwc.PayInvoiceRequest{
+		Method: "pay_invoice",
+		Params: map[string]interface{}{
+			"invoice": invoice,
+		},
+	}
+
+	contentBytes, err := json.Marshal(requestContent)
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	// Encrypt using Pleb Signer
+	encryptedContent, err := signer.Nip04Encrypt(walletPubkey, string(contentBytes))
+	if err != nil {
+		return fmt.Errorf("failed to encrypt content: %w", err)
+	}
+
+	// Create NWC request event (kind 23194)
+	evt := nostr.Event{
+		PubKey:    pubKey,
+		CreatedAt: nostr.Now(),
+		Kind:      23194,
+		Tags: nostr.Tags{
+			nostr.Tag{"p", walletPubkey},
+		},
+		Content: encryptedContent,
+	}
+
+	// Sign with Pleb Signer
+	if err := signer.SignEvent(&evt); err != nil {
+		return fmt.Errorf("failed to sign event: %w", err)
+	}
+
+	// Publish and wait for response
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	pool := nostr.NewSimplePool(ctx)
+	
+	// Subscribe to wallet responses
+	since := nostr.Now()
+	filters := []nostr.Filter{{
+		Kinds:   []int{23195}, // NIP-47 response kind
+		Authors: []string{walletPubkey},
+		Tags:    nostr.TagMap{"p": []string{pubKey}},
+		Since:   &since,
+	}}
+
+	responseChan := pool.SubMany(ctx, []string{relay}, filters)
+
+	// Publish the request
+	results := pool.PublishMany(ctx, []string{relay}, evt)
+	published := false
+	for result := range results {
+		if result.Error == nil {
+			published = true
+		}
+	}
+	
+	if !published {
+		return fmt.Errorf("failed to publish request to wallet relay")
+	}
+
+	// Wait for response
+	select {
+	case respEvent := <-responseChan:
+		if respEvent.Event == nil {
+			return fmt.Errorf("received empty response")
+		}
+
+		// Decrypt response using Pleb Signer
+		decrypted, err := signer.Nip04Decrypt(walletPubkey, respEvent.Content)
+		if err != nil {
+			return fmt.Errorf("failed to decrypt response: %w", err)
+		}
+
+		// Parse response
+		var response nwc.PayInvoiceResponse
+		if err := json.Unmarshal([]byte(decrypted), &response); err != nil {
+			return fmt.Errorf("failed to parse response: %w", err)
+		}
+
+		// Check for errors
+		if response.Error != nil {
+			return fmt.Errorf("wallet error: %s - %s", response.Error.Code, response.Error.Message)
+		}
+
+		if response.Result == nil {
+			return fmt.Errorf("no result in response")
+		}
+
+		return nil
+
+	case <-ctx.Done():
+		return fmt.Errorf("timeout waiting for wallet response")
 	}
 }
 

@@ -241,7 +241,7 @@ The app will:
 
 **Requirements**:
 - NWC connection string configured in Settings → Wallet
-- nsec authentication (Pleb Signer zaps coming soon)
+- Works with both nsec and Pleb Signer authentication!
 - Recipient must have a lightning address in their Nostr profile (lud16 field)
 
 **Note**: The 'z zap' command only appears in the footer when you have NWC connected.
