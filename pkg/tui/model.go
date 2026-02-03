@@ -849,12 +849,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			dmMap[evt.ID] = evt
 		}
 		
+		// Collect pubkeys that need profile fetching
+		pubkeysToFetch := make(map[string]bool)
+		
 		// Add new DMs to map (and count them)
 		for _, evt := range msg.events {
 			if _, exists := dmMap[evt.ID]; !exists {
 				newCount++
 			}
 			dmMap[evt.ID] = evt
+			
+			// Collect pubkeys for profile fetching
+			// Add the sender
+			if _, cached := m.userCache[evt.PubKey]; !cached {
+				pubkeysToFetch[evt.PubKey] = true
+			}
+			
+			// Add the recipient (from 'p' tag)
+			for _, tag := range evt.Tags {
+				if len(tag) >= 2 && tag[0] == "p" {
+					recipientPubkey := tag[1]
+					if _, cached := m.userCache[recipientPubkey]; !cached {
+						pubkeysToFetch[recipientPubkey] = true
+					}
+					break
+				}
+			}
 			
 			// Track latest timestamp
 			if evt.CreatedAt > m.lastDMTime {
@@ -877,32 +897,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.statusMsg = fmt.Sprintf("No new DMs (%d total)", len(m.dms))
 		}
-		m.updateContent()
 		
-		// Extract unique pubkeys from DMs and fetch their profiles
-		pubkeys := make(map[string]bool)
-		for _, evt := range m.dms {
-			pubkeys[evt.PubKey] = true
-			// Also get recipients from 'p' tags
-			for _, tag := range evt.Tags {
-				if len(tag) >= 2 && tag[0] == "p" {
-					pubkeys[tag[1]] = true
-				}
-			}
-		}
-		
-		var pubkeyList []string
-		for pk := range pubkeys {
-			if _, cached := m.userCache[pk]; !cached {
-				pubkeyList = append(pubkeyList, pk)
-			}
-		}
-		
-		if len(pubkeyList) > 0 {
-			return m, fetchProfilesCmd(m.pool, m.relays, pubkeyList)
-		}
-	
-	case notificationsMsg:
+		// Fetch profiles for DM participants
+if len(pubkeysToFetch) > 0 {
+pubkeys := make([]string, 0, len(pubkeysToFetch))
+for pk := range pubkeysToFetch {
+pubkeys = append(pubkeys, pk)
+}
+return m, fetchProfilesCmd(m.pool, m.relays, pubkeys)
+}
+
+case notificationsMsg:
 		// Merge new notifications with existing ones
 		newCount := 0
 		notifMap := make(map[string]nostr.Event)
@@ -1299,10 +1304,31 @@ func (m *Model) renderEvent(evt nostr.Event, selected bool) string {
 		}
 	}
 
-	// Get display name
+	// Get display name - for DMs, show conversation partner
 	displayName := m.userCache[evt.PubKey]
 	if displayName == "" {
 		displayName = evt.PubKey[:8] + "..."
+	}
+	
+	// For DMs (kind 4 or 1059), show who the DM is with
+	dmPrefix := ""
+	if evt.Kind == 4 || evt.Kind == 1059 {
+		if evt.PubKey == m.pubKey {
+			// We sent this DM - show recipient
+			for _, tag := range evt.Tags {
+				if len(tag) >= 2 && tag[0] == "p" {
+					recipientName := m.userCache[tag[1]]
+					if recipientName == "" {
+						recipientName = tag[1][:8] + "..."
+					}
+					dmPrefix = "💬 To @" + recipientName + ": "
+					break
+				}
+			}
+		} else {
+			// We received this DM - show sender
+			dmPrefix = "💬 From @" + displayName + ": "
+		}
 	}
 	
 	// Format timestamp
@@ -1312,9 +1338,16 @@ func (m *Model) renderEvent(evt nostr.Event, selected bool) string {
 	headerStyle := lipgloss.NewStyle().Bold(true)
 	timestampStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 	
-	header := fmt.Sprintf("%s  %s", 
-		headerStyle.Render("@"+displayName),
-		timestampStyle.Render(timestamp))
+	var header string
+	if dmPrefix != "" {
+		header = fmt.Sprintf("%s  %s", 
+			headerStyle.Render(dmPrefix),
+			timestampStyle.Render(timestamp))
+	} else {
+		header = fmt.Sprintf("%s  %s", 
+			headerStyle.Render("@"+displayName),
+			timestampStyle.Render(timestamp))
+	}
 	
 	if selected {
 		header = "> " + header
