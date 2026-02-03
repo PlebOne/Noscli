@@ -3086,10 +3086,10 @@ func payInvoiceWithSigner(ctx context.Context, nwcString string, invoice string,
 		log.Printf("❌ [Signer NWC] Signing failed: %v", err)
 		return fmt.Errorf("failed to sign event: %w", err)
 	}
-	log.Printf("✅ [Signer NWC] Event signed")
+	log.Printf("✅ [Signer NWC] Event signed, ID: %s", evt.ID)
 
 	// Publish and wait for response
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second) // Increased to 60s - wallet can be slow
 	defer cancel()
 
 	pool := nostr.NewSimplePool(ctx)
@@ -3139,8 +3139,8 @@ func payInvoiceWithSigner(ctx context.Context, nwcString string, invoice string,
 	log.Printf("⏸️  [Signer NWC] Waiting 1s after publish for wallet to process...")
 	time.Sleep(1 * time.Second)
 
-	log.Printf("⏳ [Signer NWC] Waiting for wallet response (timeout: 30s)...")
-	log.Printf("🔍 [Signer NWC] Filter: kind=23195, author=%s, p=%s", walletPubkey[:8], pubKey[:8])
+	log.Printf("⏳ [Signer NWC] Waiting for wallet response (timeout: 60s)...")
+	log.Printf("🔍 [Signer NWC] Expecting response with 'e' tag: %s or 'p' tag: %s", evt.ID[:8], pubKey[:8])
 	eventCount := 0
 	
 	// Create a ticker to periodically log that we're still waiting
@@ -3227,8 +3227,8 @@ func payInvoiceWithSigner(ctx context.Context, nwcString string, invoice string,
 			return nil
 
 		case <-ctx.Done():
-			log.Printf("⏱️  [Signer NWC] Timeout after receiving %d events", eventCount)
-			return fmt.Errorf("timeout waiting for wallet response (30s) - received %d events but none matched", eventCount)
+			log.Printf("⏱️  [Signer NWC] Timeout after receiving %d events (60s timeout)", eventCount)
+			return fmt.Errorf("timeout waiting for wallet response (60s) - received %d events but none matched", eventCount)
 		}
 	}
 }
