@@ -3094,21 +3094,28 @@ func payInvoiceWithSigner(ctx context.Context, nwcString string, invoice string,
 
 	pool := nostr.NewSimplePool(ctx)
 	
-	// Subscribe to wallet responses
+	// Subscribe to wallet responses FIRST, without Since filter to catch all responses
 	log.Printf("👂 [Signer NWC] Subscribing to wallet responses...")
-	since := nostr.Now()
+	
+	// Don't use Since - we want to catch the response whenever it comes
 	filters := []nostr.Filter{{
 		Kinds:   []int{23195}, // NIP-47 response kind
 		Authors: []string{walletPubkey},
 		Tags:    nostr.TagMap{"p": []string{pubKey}},
-		Since:   &since,
+		// No Since filter - let's catch everything
 	}}
 
+	log.Printf("📋 [Signer NWC] Subscription filter: kinds=[23195], authors=[%s], p=[%s]", 
+		walletPubkey[:8], pubKey[:8])
+	
+	// Use SubManyEose to get all existing events first, then stay open for new ones
+	// Actually, let's use SubMany but add a ticker to check if channel is alive
 	responseChan := pool.SubMany(ctx, []string{relay}, filters)
 	log.Printf("✅ [Signer NWC] Subscribed to wallet relay")
 
 	// Small delay to ensure subscription is established
-	time.Sleep(500 * time.Millisecond)
+	log.Printf("⏸️  [Signer NWC] Waiting 1s for subscription to establish...")
+	time.Sleep(1 * time.Second)
 
 	// Publish the request
 	log.Printf("📤 [Signer NWC] Publishing payment request to %s...", relay)
@@ -3127,14 +3134,31 @@ func payInvoiceWithSigner(ctx context.Context, nwcString string, invoice string,
 		log.Printf("❌ [Signer NWC] Failed to publish to wallet relay")
 		return fmt.Errorf("failed to publish request to wallet relay")
 	}
+	
+	// Add another delay after publishing to give wallet time to process
+	log.Printf("⏸️  [Signer NWC] Waiting 1s after publish for wallet to process...")
+	time.Sleep(1 * time.Second)
 
 	log.Printf("⏳ [Signer NWC] Waiting for wallet response (timeout: 30s)...")
+	log.Printf("🔍 [Signer NWC] Filter: kind=23195, author=%s, p=%s", walletPubkey[:8], pubKey[:8])
 	eventCount := 0
+	
+	// Create a ticker to periodically log that we're still waiting
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
 	
 	// Wait for response - loop through all events
 	for {
 		select {
-		case respEvent := <-responseChan:
+		case <-ticker.C:
+			log.Printf("⏰ [Signer NWC] Still waiting... (%d events so far)", eventCount)
+			
+		case respEvent, ok := <-responseChan:
+			if !ok {
+				log.Printf("❌ [Signer NWC] Response channel closed after %d events", eventCount)
+				return fmt.Errorf("response channel closed - wallet relay may have disconnected")
+			}
+			
 			eventCount++
 			log.Printf("📨 [Signer NWC] Received event #%d", eventCount)
 			
