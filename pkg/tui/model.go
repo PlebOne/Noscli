@@ -1177,9 +1177,10 @@ func (m *Model) renderEvent(evt nostr.Event, selected bool) string {
 		Padding(0, 1).
 		Width(60)
 
-	// Decrypt DMs if this is a kind 4 event
+	// Decrypt DMs if this is a kind 4 (NIP-04) or kind 1059 (NIP-17 gift wrap)
 	displayContent := evt.Content
 	if evt.Kind == 4 {
+		// NIP-04: Old encrypted DMs
 		// Determine the other party's pubkey for decryption
 		otherPubkey := ""
 		if evt.PubKey == m.pubKey {
@@ -1200,9 +1201,13 @@ func (m *Model) renderEvent(evt nostr.Event, selected bool) string {
 			if err == nil {
 				displayContent = decrypted
 			} else {
-				displayContent = "[🔒 Encrypted - Failed to decrypt]"
+				displayContent = fmt.Sprintf("[🔒 NIP-04 Encrypted - Decrypt error: %v]", err)
 			}
 		}
+	} else if evt.Kind == 1059 {
+		// NIP-17: Gift-wrapped DM
+		displayContent = "[🎁 NIP-17 Gift-wrapped DM - Unwrap support coming soon]"
+		// TODO: Implement NIP-59 unwrapping
 	}
 	
 	content := m.processContent(displayContent)
@@ -1683,9 +1688,9 @@ func fetchDMsCmd(pool *nostr.SimplePool, relays []string, pubKey string) tea.Cmd
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
-		// Fetch kind 4 (encrypted direct messages) where we are sender or recipient
+		// Fetch kind 4 (NIP-04) and kind 1059 (NIP-17 gift wrap) DMs where we are recipient
 		filter := nostr.Filter{
-			Kinds: []int{4}, // Kind 4 = Encrypted DM
+			Kinds: []int{4, 1059}, // Kind 4 = NIP-04, Kind 1059 = NIP-17 gift wrap
 			Limit: 50,
 		}
 		
@@ -2442,7 +2447,7 @@ return "", err
 }
 return plaintext, nil
 } else {
-// Use Pleb Signer
-return m.signer.Nip04Decrypt(ciphertext, otherPubkey)
+// Use Pleb Signer (note: signature is senderPubKey first, then ciphertext)
+return m.signer.Nip04Decrypt(otherPubkey, ciphertext)
 }
 }
