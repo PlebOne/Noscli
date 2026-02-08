@@ -115,6 +115,16 @@ type Model struct {
 	// Subscription management
 	activeSubCtx  context.Context    // Context for active subscriptions
 	cancelSubs    context.CancelFunc  // Function to cancel all active subscriptions
+	// NWC persistent subscription
+	nwcActive       bool                             // Whether NWC subscription is active
+	nwcResponseChan chan nostr.RelayEvent            // Channel for NWC responses
+	nwcCancelFunc   context.CancelFunc               // Cancel function for NWC subscription
+	pendingPayments map[string]chan *nostr.Event     // Map of request ID -> response channel
+}
+
+// nwcResponseMsg wraps an NWC response event
+type nwcResponseMsg struct {
+	event *nostr.Event
 }
 
 func NewModel() Model {
@@ -152,11 +162,21 @@ func NewModel() Model {
 		authMethod:  cfg.AuthMethod,
 		nsecKey:     cfg.Nsec,
 		nwcString:   cfg.NWC,
+		nwcResponseChan: make(chan nostr.RelayEvent, 10),
+		pendingPayments: make(map[string]chan *nostr.Event),
 	}
 	if err != nil {
 		m.state = stateError
 		m.err = err
 	}
+	
+	// Start NWC subscription if wallet is configured
+	if cfg.NWC != "" {
+		log.Printf("🏁 [NWC] NWC configured in config, starting subscription...")
+		m.startNWCSubscription()
+		log.Printf("🏁 [NWC] Back from startNWCSubscription, nwcActive=%v", m.nwcActive)
+	}
+	
 	return m
 }
 
@@ -165,7 +185,128 @@ func (m Model) Init() tea.Cmd {
 		return nil
 	}
 	// Start at landing screen, don't connect yet
-	return nil
+	// NWC subscription was already started in NewModel if configured
+	return waitForNWCResponse(m.nwcResponseChan)
+}
+
+// startNWCSubscription starts listening for NWC responses on the wallet relay
+func (m *Model) startNWCSubscription() {
+	if m.nwcString == "" {
+		return
+	}
+	
+	// Stop existing subscription if any
+	m.stopNWCSubscription()
+	
+	log.Printf("🔌 [NWC] Starting persistent NWC subscription...")
+	
+	// Parse NWC string
+	walletPubkey, relay, _, err := nwc.ParseNWCString(m.nwcString)
+	if err != nil {
+		log.Printf("❌ [NWC] Failed to parse NWC string: %v", err)
+		return
+	}
+	
+	log.Printf("✅ [NWC] Wallet: %s, Relay: %s", walletPubkey[:8], relay)
+	log.Printf("🔑 [NWC] Full wallet pubkey: %s", walletPubkey)
+	if m.pubKey != "" {
+		log.Printf("🔑 [NWC] Our pubkey: %s", m.pubKey)
+	} else {
+		log.Printf("⚠️  [NWC] Our pubkey not set yet (will accept all events)")
+	}
+	
+	// Create context for this subscription
+	ctx, cancel := context.WithCancel(context.Background())
+	m.nwcCancelFunc = cancel
+	
+	// Subscribe to kind 23195 events from wallet (no 'p' filter for compatibility)
+	filters := []nostr.Filter{{
+		Kinds:   []int{23195},
+		Authors: []string{walletPubkey},
+	}}
+	
+	log.Printf("📡 [NWC] Subscribing to relay: %s", relay)
+	if m.pubKey != "" {
+		log.Printf("🔍 [NWC] Filter: kinds=[23195], authors=[%s] (will check p=%s in code)", walletPubkey[:8], m.pubKey[:8])
+	} else {
+		log.Printf("🔍 [NWC] Filter: kinds=[23195], authors=[%s] (no p-tag check yet)", walletPubkey[:8])
+	}
+	responseChan := m.pool.SubMany(ctx, []string{relay}, filters)
+	m.nwcActive = true
+	log.Printf("✅ [NWC] SubMany returned, nwcActive set to true")
+	
+	// Start goroutine to forward events to our channel
+	go func() {
+		defer log.Printf("🛑 [NWC] Goroutine exiting")
+		log.Printf("👂 [NWC] Listening goroutine started, waiting for events...")
+		eventCount := 0
+		for {
+			select {
+			case event, ok := <-responseChan:
+				eventCount++
+				log.Printf("📬 [NWC] Received something from channel (count=%d, ok=%v)", eventCount, ok)
+				if !ok {
+					log.Printf("❌ [NWC] Response channel closed")
+					return
+				}
+				if event.Event != nil {
+					log.Printf("📨 [NWC] Event details: ID=%s, kind=%d, author=%s, created=%d", 
+						event.Event.ID[:8], event.Event.Kind, event.Event.PubKey[:8], event.Event.CreatedAt)
+					log.Printf("📋 [NWC] Event tags: %v", event.Event.Tags)
+					
+					// Check if it's for us (only if we have a pubkey)
+					isForUs := (m.pubKey == "") // Accept all if we don't have pubkey yet
+					if m.pubKey != "" {
+						for _, tag := range event.Event.Tags {
+							if len(tag) >= 2 && tag[0] == "p" && tag[1] == m.pubKey {
+								isForUs = true
+								break
+							}
+						}
+					}
+					log.Printf("🎯 [NWC] Event is for us: %v (our pubkey=%s)", isForUs, func() string {
+						if m.pubKey != "" {
+							return m.pubKey[:8]
+						}
+						return "(not set)"
+					}())
+					
+					// Forward to main channel regardless (we'll filter in handler)
+					select {
+					case m.nwcResponseChan <- event:
+						log.Printf("✅ [NWC] Forwarded to main channel")
+					default:
+						log.Printf("⚠️  [NWC] Response channel full, dropping event")
+					}
+				} else {
+					log.Printf("⚠️  [NWC] Received event with nil Event field")
+				}
+			case <-ctx.Done():
+				log.Printf("🛑 [NWC] Subscription stopped")
+				return
+			}
+		}
+	}()
+	
+	log.Printf("✅ [NWC] Persistent subscription active")
+}
+
+// stopNWCSubscription stops the NWC subscription
+func (m *Model) stopNWCSubscription() {
+	if m.nwcCancelFunc != nil {
+		log.Printf("🛑 [NWC] Stopping NWC subscription...")
+		m.nwcCancelFunc()
+		m.nwcCancelFunc = nil
+	}
+	m.nwcActive = false
+}
+
+// waitForNWCResponse returns a Cmd that waits for NWC responses
+func waitForNWCResponse(responseChan chan nostr.RelayEvent) tea.Cmd {
+	return func() tea.Msg {
+		event := <-responseChan
+		return nwcResponseMsg{event: event.Event}
+	}
 }
 
 func (m *Model) updateContent() {
@@ -411,10 +552,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							// Remove any trailing junk
 							cleanNWC = strings.TrimSpace(cleanNWC)
 							
+							// Stop old subscription if active
+							m.stopNWCSubscription()
+							
 							m.nwcString = cleanNWC
 							m.editingNWC = false
 							m.saveConfig()
-							m.statusMsg = "✓ NWC connection saved!"
+							
+							// Start new subscription
+							m.startNWCSubscription()
+							
+							m.statusMsg = "✓ NWC connection saved and subscription started!"
 						} else {
 							m.statusMsg = "❌ Invalid NWC format - must start with nostr+walletconnect://"
 							m.nwcString = ""
@@ -521,9 +669,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				// Delete NWC connection (only in wallet menu)
 				if m.settingsMenu == 2 {
+					// Stop NWC subscription before clearing
+					m.stopNWCSubscription()
+					
 					m.nwcString = ""
 					m.saveConfig()
-					m.statusMsg = "NWC connection removed"
+					m.statusMsg = "NWC connection removed and subscription stopped"
 				}
 			case "e":
 				// Edit NWC connection (only in wallet menu)
@@ -639,7 +790,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.editingZapAmt = false
 				m.statusMsg = "⚡ Zapping..."
-				return m, performZapCmd(m.zappingEvent, amount, m.nwcString, m.relays, m.pubKey, m.privKey, m.authMethod, m.signer)
+				return m, m.performZap(m.zappingEvent, amount)
 			case "backspace":
 				if len(m.zapAmount) > 0 {
 					m.zapAmount = m.zapAmount[:len(m.zapAmount)-1]
@@ -871,6 +1022,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.privKey = msg.privKey
 		m.nsecKey = msg.privKey // Save for persistence
 		m.saveConfig()
+		
+		// Restart NWC subscription now that we have our pubkey
+		if m.nwcString != "" {
+			log.Printf("🔄 [NWC] Restarting subscription after nsec auth (pubkey now set)")
+			m.startNWCSubscription()
+		}
+		
 		if m.pubKey == "" {
 			m.state = stateError
 			m.err = fmt.Errorf("received empty pubkey")
@@ -907,6 +1065,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	
 	case signerReadyMsg:
 		m.pubKey = msg.pubkey
+		
+		// Restart NWC subscription now that we have our pubkey
+		if m.nwcString != "" {
+			log.Printf("🔄 [NWC] Restarting subscription after signer auth (pubkey now set)")
+			m.startNWCSubscription()
+		}
+		
 		if m.pubKey == "" {
 			m.state = stateError
 			m.err = fmt.Errorf("received empty pubkey")
@@ -1148,6 +1313,42 @@ case notificationsMsg:
 		case viewNotifications:
 			return m, fetchNotificationsCmd(m.pool, m.relays, m.pubKey)
 		}
+	
+	case nwcResponseMsg:
+		// Handle NWC response - match to pending payment
+		log.Printf("📬 [NWC] Processing response: %s", msg.event.ID[:8])
+		
+		// Find which request this is responding to by checking 'e' tag
+		var requestID string
+		for _, tag := range msg.event.Tags {
+			if len(tag) >= 2 && tag[0] == "e" {
+				requestID = tag[1]
+				break
+			}
+		}
+		
+		if requestID != "" {
+			log.Printf("🔗 [NWC] Response for request: %s", requestID[:8])
+			if respChan, ok := m.pendingPayments[requestID]; ok {
+				log.Printf("✅ [NWC] Found pending payment, forwarding response")
+				// Send response to waiting channel
+				select {
+				case respChan <- msg.event:
+					log.Printf("📨 [NWC] Response delivered")
+				default:
+					log.Printf("⚠️  [NWC] Response channel full or closed")
+				}
+				// Clean up
+				delete(m.pendingPayments, requestID)
+			} else {
+				log.Printf("⚠️  [NWC] No pending payment for request %s", requestID[:8])
+			}
+		} else {
+			log.Printf("⚠️  [NWC] Response has no 'e' tag")
+		}
+		
+		// Continue waiting for more responses
+		return m, waitForNWCResponse(m.nwcResponseChan)
 	
 	case zapSuccessMsg:
 		m.statusMsg = "⚡ Zap sent successfully!"
@@ -2907,6 +3108,241 @@ func (m *Model) decryptDM(ciphertext, otherPubkey string) (string, error) {
 }
 
 // performZapCmd executes a zap payment
+// performZap creates a zap payment using persistent NWC subscription
+func (m *Model) performZap(event *nostr.Event, amountSats int64) tea.Cmd {
+	return func() tea.Msg {
+		log.Printf("🚀 Starting zap flow: amount=%d sats, auth=%s", amountSats, m.authMethod)
+		ctx := context.Background()
+
+		// Get the recipient's profile metadata to find lightning address
+		var lightningAddress string
+		
+		log.Printf("🔍 Fetching recipient profile for lightning address...")
+		filters := []nostr.Filter{{
+			Kinds:   []int{0},
+			Authors: []string{event.PubKey},
+			Limit:   1,
+		}}
+
+		pool := nostr.NewSimplePool(ctx)
+		eventChan := pool.SubManyEose(ctx, m.relays, filters)
+		
+		timeout := time.After(5 * time.Second)
+		select {
+		case evt := <-eventChan:
+			if evt.Event != nil {
+				lightningAddress = zap.GetLightningAddress(evt.Content)
+				log.Printf("✅ Found lightning address: %s", lightningAddress)
+			}
+		case <-timeout:
+			log.Printf("⏱️  Profile fetch timeout")
+		}
+
+		if lightningAddress == "" {
+			log.Printf("❌ No lightning address found")
+			return zapErrorMsg{err: fmt.Errorf("recipient has no lightning address in profile")}
+		}
+
+		// Get LNURL endpoint
+		log.Printf("🔗 Getting LNURL endpoint...")
+		lnurlEndpoint, err := zap.GetLNURL(lightningAddress)
+		if err != nil {
+			log.Printf("❌ Invalid lightning address: %v", err)
+			return zapErrorMsg{err: fmt.Errorf("invalid lightning address: %w", err)}
+		}
+		log.Printf("✅ LNURL endpoint: %s", lnurlEndpoint)
+
+		// Fetch LNURL info
+		log.Printf("📡 Fetching LNURL info...")
+		lnurlInfo, err := zap.FetchLNURLPayInfo(lnurlEndpoint)
+		if err != nil {
+			log.Printf("❌ Failed to fetch LNURL info: %v", err)
+			return zapErrorMsg{err: fmt.Errorf("failed to fetch LNURL info: %w", err)}
+		}
+		log.Printf("✅ LNURL callback: %s", lnurlInfo.Callback)
+
+		// Create zap request
+		log.Printf("📝 Creating zap request (auth: %s)...", m.authMethod)
+		var zapRequest *nostr.Event
+		if m.authMethod == "nsec" && m.privKey != "" {
+			zapRequest, err = zap.CreateZapRequest(event.PubKey, event.ID, "⚡", amountSats, m.relays, m.privKey)
+			if err != nil {
+				log.Printf("❌ Failed to create zap request: %v", err)
+				return zapErrorMsg{err: fmt.Errorf("failed to create zap request: %w", err)}
+			}
+		} else {
+			amountMsats := amountSats * 1000
+			zapRequest = &nostr.Event{
+				PubKey:    m.pubKey,
+				CreatedAt: nostr.Now(),
+				Kind:      9734,
+				Tags: nostr.Tags{
+					nostr.Tag{"p", event.PubKey},
+					nostr.Tag{"amount", fmt.Sprintf("%d", amountMsats)},
+					nostr.Tag{"e", event.ID},
+				},
+				Content: "⚡",
+			}
+			for _, relay := range m.relays {
+				zapRequest.Tags = append(zapRequest.Tags, nostr.Tag{"relays", relay})
+			}
+			if err := m.signer.SignEvent(zapRequest); err != nil {
+				log.Printf("❌ Failed to sign zap request: %v", err)
+				return zapErrorMsg{err: fmt.Errorf("failed to sign zap request: %w", err)}
+			}
+		}
+		log.Printf("✅ Zap request created and signed")
+
+		// Get invoice
+		log.Printf("💰 Requesting invoice...")
+		invoice, err := zap.GetInvoice(lnurlInfo.Callback, amountSats, zapRequest)
+		if err != nil {
+			log.Printf("❌ Failed to get invoice: %v", err)
+			return zapErrorMsg{err: fmt.Errorf("failed to get invoice: %w", err)}
+		}
+		log.Printf("✅ Invoice received: %s...", invoice[:20])
+
+		// Pay invoice via NWC
+		log.Printf("💸 Paying invoice via NWC (auth: %s)...", m.authMethod)
+		if m.authMethod == "nsec" && m.privKey != "" {
+			// Use NWC client with private key (old method)
+			log.Printf("🔑 Creating NWC client with nsec...")
+			nwcClient, err := nwc.NewNWCClient(m.nwcString)
+			if err != nil {
+				log.Printf("❌ Failed to create NWC client: %v", err)
+				return zapErrorMsg{err: fmt.Errorf("failed to create NWC client: %w", err)}
+			}
+			log.Printf("✅ NWC client created, calling PayInvoice...")
+			if err := nwcClient.PayInvoice(ctx, invoice); err != nil {
+				log.Printf("❌ PayInvoice failed: %v", err)
+				return zapErrorMsg{err: fmt.Errorf("failed to pay invoice: %w", err)}
+			}
+		} else {
+			// Use persistent NWC subscription with Pleb Signer
+			log.Printf("🔏 Using persistent NWC subscription with Pleb Signer...")
+			if err := m.payInvoiceWithPersistentSub(ctx, invoice); err != nil {
+				log.Printf("❌ Payment failed: %v", err)
+				return zapErrorMsg{err: fmt.Errorf("failed to pay invoice: %w", err)}
+			}
+		}
+
+		log.Printf("🎉 Zap successful!")
+		return zapSuccessMsg{}
+	}
+}
+
+// payInvoiceWithPersistentSub uses the persistent NWC subscription to pay an invoice
+func (m *Model) payInvoiceWithPersistentSub(ctx context.Context, invoice string) error {
+	if !m.nwcActive {
+		return fmt.Errorf("NWC subscription not active")
+	}
+	
+	log.Printf("📋 [Persistent NWC] Parsing NWC string...")
+	walletPubkey, relay, _, err := nwc.ParseNWCString(m.nwcString)
+	if err != nil {
+		return fmt.Errorf("failed to parse NWC string: %w", err)
+	}
+	log.Printf("✅ [Persistent NWC] Wallet: %s, Relay: %s", walletPubkey[:8], relay)
+
+	// Create payment request
+	requestContent := nwc.PayInvoiceRequest{
+		Method: "pay_invoice",
+		Params: map[string]interface{}{
+			"invoice": invoice,
+		},
+	}
+
+	contentBytes, err := json.Marshal(requestContent)
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+	log.Printf("📦 [Persistent NWC] Request: %s", string(contentBytes))
+
+	// Encrypt with Pleb Signer
+	log.Printf("🔐 [Persistent NWC] Encrypting...")
+	encryptedContent, err := m.signer.Nip04Encrypt(walletPubkey, string(contentBytes))
+	if err != nil {
+		return fmt.Errorf("failed to encrypt: %w", err)
+	}
+
+	// Create and sign event
+	evt := nostr.Event{
+		PubKey:    m.pubKey,
+		CreatedAt: nostr.Now(),
+		Kind:      23194,
+		Tags:      nostr.Tags{nostr.Tag{"p", walletPubkey}},
+		Content:   encryptedContent,
+	}
+
+	log.Printf("✍️  [Persistent NWC] Signing...")
+	if err := m.signer.SignEvent(&evt); err != nil {
+		return fmt.Errorf("failed to sign: %w", err)
+	}
+	log.Printf("✅ [Persistent NWC] Event signed: %s", evt.ID[:8])
+
+	// Register pending payment BEFORE publishing
+	responseChan := make(chan *nostr.Event, 1)
+	m.pendingPayments[evt.ID] = responseChan
+	log.Printf("📝 [Persistent NWC] Registered pending payment: %s", evt.ID[:8])
+
+	// Publish request
+	log.Printf("📤 [Persistent NWC] Publishing to %s...", relay)
+	publishCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	
+	results := m.pool.PublishMany(publishCtx, []string{relay}, evt)
+	published := false
+	for result := range results {
+		if result.Error == nil {
+			published = true
+			log.Printf("✅ [Persistent NWC] Published successfully")
+		} else {
+			log.Printf("❌ [Persistent NWC] Publish error: %v", result.Error)
+		}
+	}
+
+	if !published {
+		delete(m.pendingPayments, evt.ID)
+		return fmt.Errorf("failed to publish to wallet relay")
+	}
+
+	// Wait for response with timeout
+	log.Printf("⏳ [Persistent NWC] Waiting for response (60s timeout)...")
+	select {
+	case response := <-responseChan:
+		log.Printf("📨 [Persistent NWC] Received response!")
+		
+		// Decrypt response
+		decrypted, err := m.signer.Nip04Decrypt(walletPubkey, response.Content)
+		if err != nil {
+			return fmt.Errorf("failed to decrypt response: %w", err)
+		}
+		log.Printf("📄 [Persistent NWC] Decrypted: %s", decrypted)
+
+		// Parse response
+		var resp nwc.PayInvoiceResponse
+		if err := json.Unmarshal([]byte(decrypted), &resp); err != nil {
+			return fmt.Errorf("failed to parse response: %w", err)
+		}
+
+		if resp.Error != nil {
+			return fmt.Errorf("wallet error: %s - %s", resp.Error.Code, resp.Error.Message)
+		}
+
+		if resp.Result == nil {
+			return fmt.Errorf("no result in response")
+		}
+
+		log.Printf("✅ [Persistent NWC] Payment successful!")
+		return nil
+
+	case <-time.After(60 * time.Second):
+		delete(m.pendingPayments, evt.ID)
+		log.Printf("⏱️  [Persistent NWC] Timeout waiting for response")
+		return fmt.Errorf("timeout waiting for wallet response (60s)")
+	}
+}
+
 func performZapCmd(event *nostr.Event, amountSats int64, nwcString string, relays []string, pubKey string, privKey string, authMethod string, signer *signer.PlebSigner) tea.Cmd {
 	return func() tea.Msg {
 		log.Printf("🚀 Starting zap flow: amount=%d sats, auth=%s", amountSats, authMethod)
@@ -3023,6 +3459,9 @@ func performZapCmd(event *nostr.Event, amountSats int64, nwcString string, relay
 		} else {
 			// Use NWC with Pleb Signer
 			log.Printf("🔏 Using Pleb Signer for NWC...")
+			// Note: We can't access the Model's pool from here since we're in a tea.Cmd
+			// For now, we'll still create a new pool per request
+			// TODO: Refactor to use persistent NWC subscription like Amethyst
 			if err := payInvoiceWithSigner(ctx, nwcString, invoice, pubKey, signer); err != nil {
 				log.Printf("❌ payInvoiceWithSigner failed: %v", err)
 				return zapErrorMsg{err: fmt.Errorf("failed to pay invoice: %w", err)}
