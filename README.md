@@ -67,6 +67,8 @@ go build -o noscli .
    - **Settings**: Configure authentication and relays
 3. **First time users MUST go to Settings to choose an authentication method**
 
+Options: `--help`, `--version`, and `--debug` (writes a debug log to `$XDG_STATE_HOME/noscli/debug.log`, default `~/.local/state/noscli/debug.log`, replaced on each start).
+
 **Setup Flow:**
 ```
 1. Launch noscli → Landing Screen
