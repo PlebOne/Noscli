@@ -65,6 +65,8 @@ type Model struct {
 	state         sessionState
 	currentView   viewMode
 	signer        *signer.PlebSigner
+	signerErr     error              // Why the signer is nil, if it is
+	startupWarnings []string         // Non-fatal startup problems shown on the landing screen
 	pubKey        string
 	privKey       string             // Private key if using nsec auth
 	npub          string
@@ -138,6 +140,14 @@ func NewModel() Model {
 	ta.SetWidth(60)
 	ta.SetHeight(5)
 	
+	// Startup problems are shown on the landing screen instead of stopping the app
+	var warnings []string
+	if err != nil {
+		// No session bus (e.g. SSH/headless): nsec login still works
+		s = nil
+		warnings = append(warnings, fmt.Sprintf("⚠️ Pleb Signer unavailable: %v (nsec login still works via Settings)", err))
+	}
+
 	// Load saved config
 	cfg, cfgErr := config.Load()
 	if cfgErr != nil {
@@ -145,8 +155,9 @@ func NewModel() Model {
 		cfg = &config.Config{
 			Relays: []string{"wss://relay.damus.io", "wss://relay.nostr.band"},
 		}
+		warnings = append(warnings, fmt.Sprintf("⚠️ %v. Using defaults; saving settings will overwrite it.", cfgErr))
 	}
-	
+
 	m := Model{
 		state:       stateLanding,
 		currentView: viewFollowing,
@@ -164,12 +175,10 @@ func NewModel() Model {
 		nwcString:   cfg.NWC,
 		nwcResponseChan: make(chan nostr.RelayEvent, 10),
 		pendingPayments: make(map[string]chan *nostr.Event),
+		signerErr:   err,
+		startupWarnings: warnings,
 	}
-	if err != nil {
-		m.state = stateError
-		m.err = err
-	}
-	
+
 	// Start NWC subscription if wallet is configured
 	if cfg.NWC != "" {
 		log.Printf("🏁 [NWC] NWC configured in config, starting subscription...")
@@ -454,7 +463,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					} else {
 						m.state = stateConnecting
 						if m.authMethod == "pleb_signer" {
-							return m, connectToPlebSignerCmd(m.signer)
+							return m, connectToPlebSignerCmd(m.signer, m.signerErr)
 						} else {
 							return m, connectWithNsecCmd(m.nsecKey)
 						}
@@ -647,7 +656,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					// Start client if auth method is set
 					m.state = stateConnecting
 					if m.authMethod == "pleb_signer" {
-						return m, connectToPlebSignerCmd(m.signer)
+						return m, connectToPlebSignerCmd(m.signer, m.signerErr)
 					} else {
 						return m, connectWithNsecCmd(m.nsecKey)
 					}
@@ -2794,6 +2803,13 @@ content.WriteString(selectedStyle.Render("► Settings"))
 }
 
 content.WriteString("\n\n\n")
+for _, w := range m.startupWarnings {
+content.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Align(lipgloss.Center).Width(m.width).Render(w))
+content.WriteString("\n")
+}
+if len(m.startupWarnings) > 0 {
+content.WriteString("\n")
+}
 content.WriteString(versionStyle.Render("Use ↑/↓ or j/k to navigate • Enter to select • q to quit"))
 
 return content.String()
@@ -2994,8 +3010,11 @@ content.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render
 return content.String()
 }
 
-func connectToPlebSignerCmd(signer *signer.PlebSigner) tea.Cmd {
+func connectToPlebSignerCmd(signer *signer.PlebSigner, signerErr error) tea.Cmd {
 return func() tea.Msg {
+if signer == nil {
+return errMsg{signerErr}
+}
 pubKey, err := signer.GetPublicKey()
 if err != nil {
 return errMsg{err}

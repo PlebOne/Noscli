@@ -2,6 +2,7 @@ package signer
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/godbus/dbus/v5"
@@ -13,6 +14,10 @@ const (
 	ObjectPath = "/com/plebsigner/Signer"
 	Interface = "com.plebsigner.Signer1"
 )
+
+// ErrNotConnected is returned by methods called on a nil *PlebSigner, which
+// happens when no D-Bus session bus was available at startup.
+var ErrNotConnected = errors.New("not connected to Pleb Signer")
 
 type PlebSigner struct {
 	conn *dbus.Conn
@@ -30,6 +35,9 @@ func NewPlebSigner() (*PlebSigner, error) {
 }
 
 func (s *PlebSigner) IsReady() (bool, error) {
+	if s == nil {
+		return false, ErrNotConnected
+	}
 	var ready bool
 	err := s.obj.Call(Interface+".IsReady", 0).Store(&ready)
 	return ready, err
@@ -49,6 +57,9 @@ type PublicKeyResult struct {
 }
 
 func (s *PlebSigner) GetPublicKey() (string, error) {
+	if s == nil {
+		return "", ErrNotConnected
+	}
 	var jsonStr string
 	err := s.obj.Call(Interface+".GetPublicKey", 0).Store(&jsonStr)
 	if err != nil {
@@ -85,6 +96,9 @@ func (s *PlebSigner) GetPublicKey() (string, error) {
 }
 
 func (s *PlebSigner) SignEvent(evt *nostr.Event) error {
+	if s == nil {
+		return ErrNotConnected
+	}
 	// Serialize event to JSON (without ID and Sig)
 	eventJSON, err := json.Marshal(evt)
 	if err != nil {
@@ -140,6 +154,9 @@ func (s *PlebSigner) SignEvent(evt *nostr.Event) error {
 }
 
 func (s *PlebSigner) Nip04Encrypt(recipientPubKey string, plaintext string) (string, error) {
+	if s == nil {
+		return "", ErrNotConnected
+	}
 	var respJSON string
 	// args: plaintext, recipient_pubkey, app_id
 	err := s.obj.Call(Interface+".Nip04Encrypt", 0, plaintext, recipientPubKey, "noscli").Store(&respJSON)
@@ -170,6 +187,9 @@ func (s *PlebSigner) Nip04Encrypt(recipientPubKey string, plaintext string) (str
 }
 
 func (s *PlebSigner) Nip04Decrypt(senderPubKey string, ciphertext string) (string, error) {
+	if s == nil {
+		return "", ErrNotConnected
+	}
 	var respJSON string
 	// args: ciphertext, sender_pubkey, app_id
 	err := s.obj.Call(Interface+".Nip04Decrypt", 0, ciphertext, senderPubKey, "noscli").Store(&respJSON)
@@ -200,5 +220,8 @@ func (s *PlebSigner) Nip04Decrypt(senderPubKey string, ciphertext string) (strin
 }
 
 func (s *PlebSigner) Close() error {
+	if s == nil {
+		return nil
+	}
 	return s.conn.Close()
 }
