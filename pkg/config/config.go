@@ -58,7 +58,7 @@ return nil, fmt.Errorf("failed to read config: %w", err)
 
 var cfg Config
 if err := json.Unmarshal(data, &cfg); err != nil {
-return nil, fmt.Errorf("failed to parse config: %w", err)
+return nil, fmt.Errorf("failed to parse config %s: %w", path, err)
 }
 
 // Ensure we have default relays if none saved
